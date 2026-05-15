@@ -4,126 +4,363 @@ Avulsas, mantendo compatibilidade total com o contrato atual.
 
 ---
 
-## 1. Contexto da Arquitetura
-O projeto segue o padrão Adapter → Facade → Repository com Translator/Mapper.
-Arquivos principais:
-- CobrancasEmitidasAdapter.cs
-- CobrancasEmitidasFacade.cs
-- CobrancasEmitidasRepository.cs (ou similar)
-- CobrancasEmitidasDto.cs
-- MovimentoCobrancaConverter.cs (Translator/Mapper)
+## 1. Arquitetura
+Padrão: Adapter → Facade → Repository com Mapper estático.
+Namespace base: Facade.Repositories / Domain.Utils / Domain.Models
 
 ---
 
-## 2. Parâmetros de Entrada (sem alteração de contrato)
+## 2. O que JÁ FOI FEITO (não alterar)
 
-| Parâmetro            | Tipo    | Obrigatório | Regra/Domínio                                                                 |
-|----------------------|---------|-------------|-------------------------------------------------------------------------------|
-| id_cota              | int[]   | N           | Lista de até 50 id_cota                                                       |
-| parcela              | smallint| N           | Número da parcela a pesquisar                                                 |
-| tp_cobranca          | string  | N           | T=todos (default), P=Parcela/mensal, A=Avulso                                 |
-| num_page             | int     | N           | Default 1                                                                     |
-| size_page            | int     | N           | Default 15                                                                    |
-| tp_movimento_cobranca| string  | N           | Aplicável apenas quando tp_cobranca=A ou P. Valores por tipo abaixo:          |
-|                      |         |             | P: ID_CD_MOVTO_FIN = '0010'                                                   |
-|                      |         |             | L Lançe → 0410, 0420, 0430, 0610, 0620, 0630, 1110                           |
-|                      |         |             | A Antecipação → 0810, 1010                                                    |
-|                      |         |             | Q Quitação → 1120                                                             |
-|                      |         |             | T Tarifas → 1660,1670,1980,1750,1790,1950,1990,1710,1960,1970                 |
-|                      |         |             | O Outros → diferente de todos acima                                           |
+### CobrancasEmitidasDto.cs
+```csharp
+public class CobrancasEmitidasDto
+{
+    [FromQuery(Name = "id_cota")]
+    public List<int> IdCota { get; set; }
+
+    [FromQuery(Name = "parcela")]
+    public short? Parcela { get; set; }
+
+    [FromQuery(Name = "tp_cobranca")]
+    public string TipoCobranca { get; set; } = "P";
+
+    [FromQuery(Name = "tp_movimento_cobranca")]
+    public string TipoMovimentoCobranca { get; set; }
+
+    [FromQuery(Name = "num_page")]
+    [DefaultValue(1)]
+    public int NumPage { get; set; } = 1;
+
+    [FromQuery(Name = "size_page")]
+    [DefaultValue(15)]
+    public int SizePage { get; set; } = 15;
+}
+```
+
+### MovimentoCobrancaConverter.cs
+```csharp
+public static class MovimentoCobrancaConverter
+{
+    private static readonly Dictionary<string, List<int>> CodigosPorTipo =
+        new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase)
+    {
+        { "P", new List<int> { 10 } },
+        { "L", new List<int> { 410, 420, 430, 610, 620, 630, 1110 } },
+        { "A", new List<int> { 810, 1010 } },
+        { "Q", new List<int> { 1120 } },
+        { "T", new List<int> { 1660,1670,1980,1750,1790,1950,1990,1710,1960,1970 } },
+        { "O", new List<int>() }
+    };
+
+    public static List<int> ObterCodigosPorTipo(string tipo)
+    {
+        if (string.IsNullOrEmpty(tipo)) return new List<int>();
+
+        if (tipo.Equals("O", StringComparison.OrdinalIgnoreCase))
+            return CodigosPorTipo
+                .Where(kvp => !kvp.Key.Equals("O", StringComparison.OrdinalIgnoreCase))
+                .SelectMany(kvp => kvp.Value)
+                .Distinct()
+                .ToList();
+
+        if (CodigosPorTipo.TryGetValue(tipo.ToUpper(), out var codigos))
+            return codigos;
+
+        return new List<int>();
+    }
+}
+```
+
+### CobrancasEmitidasRepository.cs — métodos já existentes
+```csharp
+[ExcludeFromCodeCoverage]
+public class CobrancasEmitidasRepository : ICobrancasEmitidasRepository
+{
+    private readonly DbContext _dbContext;
+
+    public CobrancasEmitidasRepository(DbContext dbContext)
+        => _dbContext = dbContext;
+
+    public async Task<int> GetCount(List<int> id_cota, short? parcela)
+    {
+        var query = _dbContext.VwTaAclRemessaMensalCota.AsQueryable();
+        query = query.Where(_ => id_cota.Contains(_.IdCota));
+        if (parcela.HasValue)
+            query = query.Where(_ => _.NoParcela == parcela);
+        return await query.AsNoTracking().CountAsync();
+    }
+
+    public async Task<List<VwTaAclParcelas>> GetParcelas(
+        List<int> id_cota, short? parcela)
+    {
+        var query = _dbContext.VwTaAclParcelas.AsQueryable();
+        query = query.Where(_ => id_cota.Contains(_.IdCota));
+        if (parcela.HasValue)
+            query = query.Where(_ => _.Parcela == parcela);
+        return await query.AsNoTracking().ToListAsync();
+    }
+
+    public async Task<List<VwTaAclRemessaMensalCota>> GetRemessaMensalCota(
+        List<int> id_cota, short? parcela, int numPage, int sizePage)
+    {
+        int pular = (numPage - 1) * sizePage;
+        var query = _dbContext.VwTaAclRemessaMensalCota.AsQueryable();
+        query = query.Where(_ => id_cota.Contains(_.IdCota));
+        if (parcela.HasValue)
+            query = query.Where(_ => _.NoParcela == parcela);
+        return await query
+            .OrderBy(_ => _.IdCota).ThenBy(_ => _.NoParcela)
+            .Skip(pular).Take(sizePage)
+            .AsNoTracking().ToListAsync();
+    }
+
+    public async Task<List<VwTaAclRemessaMensalVlBoleto>> GetRemessaMensalVlBoleto(
+        List<int> IdConco021A)
+        => await _dbContext.VwTaAclRemessaMensalVlBoleto
+            .Where(_ => IdConco021A.Contains(_.IdConco021A))
+            .ToListAsync();
+
+    public async Task<List<VwTaAclDemonstrativoGrupo>> GetDemonstrativoGrupo(
+        List<int> IdAssembleia)
+        => await _dbContext.VwTaAclDemonstrativoGrupo
+            .Where(_ => IdAssembleia.Contains(_.IdAssembleia))
+            .ToListAsync();
+}
+```
+
+### MapearCobrancasEmitidas — mapper mensal já existente
+```csharp
+private static CobrancasEmitidas MapearCobrancasEmitidas(
+    GetCobrancasEmitidasRequest request,
+    VwTaAclRemessaMensalCota cota,
+    VwTaAclParcelas parcela,
+    VwTaAclDemonstrativoGrupo grupo,
+    List<VwTaAclRemessaMensalVlBoleto> boleto)
+{
+    return new CobrancasEmitidas
+    {
+        TpCobranca          = request.TipoCobranca,
+        DtVencimento        = parcela?.DtVencimento,
+        IdCota              = cota.IdCota,
+        NoParcela           = cota.NoParcela,
+        CdInscricaoNacional = cota.CdInscricaoNacional,
+        DtDocumento         = grupo?.DtEmissao,
+        NoDocumento         = string.IsNullOrEmpty(cota.NoIdentificador)
+                                ? cota.NoIdentificador
+                                : cota.NoIdentificador.Trim().Replace("\u0000", ""),
+        DtProcessamento     = grupo?.DtEmissao,
+        NossoNumero         = string.IsNullOrEmpty(cota.NossoNumero)
+                                ? cota.NossoNumero
+                                : cota.NossoNumero.Trim().Replace("\u0000", ""),
+        NoCarteira          = cota.NoCarteiraImpresaBolota,
+        VlDocumento         = boleto.Sum(_ => _.VlContribuicao),
+        VlFundoComum        = boleto.FirstOrDefault(_ =>
+                                _.IdTipoContribuicao == "FC")?.VlContribuicao ?? 0,
+        VlFundoReserva      = boleto.FirstOrDefault(_ =>
+                                _.IdTipoContribuicao == "FR")?.VlContribuicao ?? 0,
+        VlTaxaAdm           = boleto.FirstOrDefault(_ =>
+                                _.IdTipoContribuicao == "TA")?.VlContribuicao ?? 0,
+        VlSeguro            = boleto.FirstOrDefault(_ =>
+                                _.IdTipoContribuicao == "SG")?.VlContribuicao ?? 0,
+        VlMultaJuros        = boleto.FirstOrDefault(_ =>
+                                _.IdTipoContribuicao == "MJ")?.VlContribuicao ?? 0,
+        VlDiferencaParcela  = boleto.FirstOrDefault(_ =>
+                                _.IdTipoContribuicao == "DP")?.VlContribuicao ?? 0,
+        VlOutros            = boleto.FirstOrDefault(_ =>
+                                _.IdTipoContribuicao == "OU")?.VlContribuicao ?? 0,
+        VlCobrado           = boleto.Sum(_ => _.VlContribuicao),
+        NomeSacado          = string.IsNullOrEmpty(cota.NmPessoa)
+                                ? cota.NmPessoa : cota.NmPessoa.Trim(),
+        Endereco            = string.IsNullOrEmpty(cota.Endereco)
+                                ? cota.Endereco : cota.Endereco.Trim(),
+        Bairro              = string.IsNullOrEmpty(cota.Bairro)
+                                ? cota.Bairro : cota.Bairro.Trim(),
+        NoEndereco          = string.IsNullOrEmpty(cota.NoEndereco)
+                                ? cota.NoEndereco : cota.NoEndereco.Trim(),
+        NmCidade            = string.IsNullOrEmpty(cota.NmCidade)
+                                ? cota.NmCidade : cota.NmCidade.Trim(),
+        IdUf                = string.IsNullOrEmpty(cota.IdUf)
+                                ? cota.IdUf : cota.IdUf.Trim(),
+        Complemento         = string.IsNullOrEmpty(cota.Complemento)
+                                ? cota.Complemento : cota.Complemento.Trim(),
+        Cep                 = cota.Cep,
+        DtPermanencia       = cota.DtPermanencia,
+        LinhaDigitavel      = cota.LinhaDigitavel,
+        CdBarra             = cota.CdBarra,
+        MensagemRecebido    = cota.MensagemBoleto,
+        // Campos exclusivos de avulso — em branco para mensal
+        IdCdMovtoFin        = string.Empty,
+        NmCdMovtoFin        = string.Empty,
+        DsParcela           = string.Empty,
+    };
+}
+```
 
 ---
 
-## 3. Regra de Seleção por tp_cobranca
+## 3. O que PRECISA SER IMPLEMENTADO
 
-| tp_cobranca | Fonte de dados                                          |
-|-------------|---------------------------------------------------------|
-| P           | vw_TAAclRemessaMensalCota + views auxiliares (atual)    |
-| A           | vw_TAAclCobrancasAvulsas                                |
-| T (default) | União das duas fontes acima                             |
+### 3.1 CobrancasEmitidas — adicionar campos novos
+```csharp
+// Exclusivos de Avulso — string.Empty para registros mensais
+public string IdCdMovtoFin { get; set; }
+public string NmCdMovtoFin { get; set; }
+public string DsParcela    { get; set; }
+```
+
+### 3.2 ICobrancasEmitidasRepository — adicionar ao contrato
+```csharp
+Task<int> GetCountAvulsas(List<int> id_cota);
+Task<List<VwTaAclCobrancasAvulsas>> GetCobrancasAvulsas(
+    List<int> id_cota, int numPage, int sizePage);
+```
+
+### 3.3 CobrancasEmitidasRepository — implementar novos métodos
+Seguir EXATAMENTE o mesmo padrão dos métodos já existentes:
+```csharp
+public async Task<int> GetCountAvulsas(List<int> id_cota)
+{
+    var query = _dbContext.VwTaAclCobrancasAvulsas.AsQueryable();
+    query = query.Where(_ => id_cota.Contains(_.IdCota));
+    return await query.AsNoTracking().CountAsync();
+}
+
+public async Task<List<VwTaAclCobrancasAvulsas>> GetCobrancasAvulsas(
+    List<int> id_cota, int numPage, int sizePage)
+{
+    int pular = (numPage - 1) * sizePage;
+    var query = _dbContext.VwTaAclCobrancasAvulsas.AsQueryable();
+    query = query.Where(_ => id_cota.Contains(_.IdCota));
+    return await query
+        .OrderBy(_ => _.IdCota)
+        .Skip(pular).Take(sizePage)
+        .AsNoTracking().ToListAsync();
+}
+```
+
+### 3.4 Facade — GetPaginacao ajustado
+```csharp
+// "P" → apenas GetCount() — comportamento atual
+// "A" → apenas GetCountAvulsas()
+// "T" → GetCount() + GetCountAvulsas() somados
+
+ResultPaginacao resultado = new()
+{
+    Qtdreg = request.TipoCobranca switch
+    {
+        "A" => await _repo.GetCountAvulsas(request.IdCota),
+        "T" => await _repo.GetCount(request.IdCota, request.Parcela)
+             + await _repo.GetCountAvulsas(request.IdCota),
+        _   => await _repo.GetCount(request.IdCota, request.Parcela),
+    },
+    NumPage  = paginacao.NumPage,
+    SizePage = paginacao.PageSize
+};
+resultado.Qtdpag = Convert.ToInt32(
+    Math.Ceiling(Convert.ToDouble(resultado.Qtdreg) / paginacao.PageSize));
+return resultado;
+```
+
+### 3.5 Facade — GetCobrancasEmitidas ajustado
+```csharp
+var ret = request.TipoCobranca switch
+{
+    "A" => await GetAvulsas(request, resultPaginacao.NumPage, resultPaginacao.SizePage),
+    "T" => (await GetMensais(request, resultPaginacao.NumPage, resultPaginacao.SizePage))
+               .Concat(
+           await GetAvulsas(request, resultPaginacao.NumPage, resultPaginacao.SizePage))
+               .ToList(),
+    _   => await GetMensais(request, resultPaginacao.NumPage, resultPaginacao.SizePage),
+};
+
+// Extrair fluxo mensal para método privado GetMensais() 
+// com o código já existente (foreach + MapearCobrancasEmitidas)
+
+// Novo método privado GetAvulsas():
+private async Task<List<CobrancasEmitidas>> GetAvulsas(
+    GetCobrancasEmitidasRequest request, int numPage, int sizePage)
+{
+    var avulsas = await _repo.GetCobrancasAvulsas(
+        request.IdCota, numPage, sizePage);
+
+    return avulsas
+        .Select(a => MapearCobrancasAvulsas(request, a))
+        .ToList();
+}
+```
+
+### 3.6 Novo mapper para Avulso
+```csharp
+private static CobrancasEmitidas MapearCobrancasAvulsas(
+    GetCobrancasEmitidasRequest request,
+    VwTaAclCobrancasAvulsas avulsa)
+{
+    return new CobrancasEmitidas
+    {
+        TpCobranca          = request.TipoCobranca,
+        DtVencimento        = avulsa.DtVencimento,
+        IdCota              = avulsa.IdCota,
+        NoParcela           = string.Empty,
+        CdInscricaoNacional = avulsa.CdInscricaoNacional,
+        DtDocumento         = avulsa.DhInclusao,
+        NoDocumento         = avulsa.NoDocumento,
+        DtProcessamento     = avulsa.DhInclusao,
+        NossoNumero         = avulsa.NossoNumero,
+        NoCarteira          = avulsa.NoCarteiraImpresaBoleto,
+        VlDocumento         = avulsa.VlDocumento,
+        VlFundoComum        = 0,
+        VlFundoReserva      = 0,
+        VlTaxaAdm           = 0,
+        VlSeguro            = 0,
+        VlMultaJuros        = 0,
+        VlDiferencaParcela  = 0,
+        VlOutros            = 0,
+        VlCobrado           = 0,
+        NomeSacado          = avulsa.NmPessoa?.Trim(),
+        Endereco            = avulsa.Endereco?.Trim(),
+        Bairro              = avulsa.Bairro?.Trim(),
+        NoEndereco          = avulsa.NoEndereco?.Trim(),
+        NmCidade            = avulsa.NmCidade?.Trim(),
+        IdUf                = avulsa.IdUf?.Trim(),
+        Complemento         = avulsa.Complemento?.Trim(),
+        Cep                 = avulsa.Cep,
+        DtPermanencia       = avulsa.DtPermanencia,
+        LinhaDigitavel      = avulsa.LinhaDigitavel,
+        CdBarra             = avulsa.CdBarra,
+        MensagemRecebido    = string.Concat(
+                                avulsa.MensagemCompensacao,
+                                avulsa.MensagemRecibo002,
+                                avulsa.MensagemRecibo003),
+        IdCdMovtoFin        = avulsa.IdCdMovtoFin,
+        NmCdMovtoFin        = avulsa.NmCdMovtoFin,
+        DsParcela           = avulsa.DsParcela,
+    };
+}
+```
 
 ---
 
-## 4. Parâmetros de Saída — Mapeamento por Origem
+## 4. Regras Importantes
 
-### Campos compartilhados (P e A)
-
-| Campo              | Tipo     | Origem Mensal (P)                              | Origem Avulso (A)                          |
-|--------------------|----------|------------------------------------------------|--------------------------------------------|
-| tp_cobranca        | string   | Derivado do request                            | Derivado do request                        |
-| DT_Vencimento      | datetime | Vw_TaaclParcelas                               | vw_TAAclCobrancasAvulsas.DT_Vencimento     |
-| NO_Parcela         | string   | vw_TAAclRemessaMensalCota.NO_Parcela           | (em branco)                                |
-| CD_InscricaoNacional| varchar | vw_TAAclRemessaMensalCota                      | vw_TAAclPessoas (CPF/CNPJ na data emissão) |
-| DT_Documento       | datetime | vw_TAAclDemonstrativoGrupo.dt_emissao          | vw_TAAclCobrancasAvulsas.DH_Inclusao       |
-| NO_Documento       | string   | vw_TAAclRemessaMensalCota.no_identificador     | vw_TAAclCobrancasAvulsas.NO_Documento      |
-| DT_Processamento   | datetime | vw_TAAclDemonstrativoGrupo.dt_emissao          | vw_TAAclCobrancasAvulsas.DH_Inclusao       |
-| Nosso_Numero       | string   | vw_TAAclRemessaMensalCota                      | vw_TAAclCobrancasAvulsas.Nosso_Numero      |
-| NO_Carteira        | int      | vw_TAAclRemessaMensalCota.no_carteira_impres.. | vw_TAAclCobrancasAvulsas.NO_Carteira_Impresa_Boleto |
-| VL_Documento       | decimal  | Somar vw_TAAclRemessaMensalCota IVLBoleto      | vw_TAAclCobrancasAvulsas.VL_Documento      |
-| Dt_Permanencia     | datetime | vw_TAAclRemessaMensalCota                      | vw_TAAclCobrancasAvulsas.DT_Permanencia    |
-| Linha_Digitavel    | string   | vw_TAAclRemessaMensalCota                      | vw_TAAclCobrancasAvulsas.Linha_Digitavel   |
-| CD_Barra           | string   | vw_TAAclRemessaMensalCota                      | vw_TAAclCobrancasAvulsas.CD_Barra          |
-| Mensagem_Recibo    | string   | vw_TAAclRemessaMensalCota                      | Concatenar: Mensagem_Compensacao + Mensagem_Recibo_002 + Mensagem_Recibo_003 |
-
-### Campos com valor fixo 0 para Avulso
-
-| Campo            | Origem Mensal (P)                                              |
-|------------------|----------------------------------------------------------------|
-| VL_Fundo_Comum   | Soma IVLBoleto onde ID_Tipo_Contribuicao='FC'                  |
-| VL_Fundo_Reserva | Soma IVLBoleto onde ID_Tipo_Contribuicao='FR'                  |
-| VL_Taxa_Adm      | Soma IVLBoleto onde ID_Tipo_Contribuicao='TA'                  |
-| VL_Seguro        | Soma IVLBoleto onde ID_Tipo_Contribuicao='SG'                  |
-| VL_Multa_Juros   | Soma IVLBoleto onde ID_Tipo_Contribuicao='MJ'                  |
-| VL_Diferenca_Parcela | Soma IVLBoleto onde ID_Tipo_Contribuicao='DP'              |
-| VL_Outros        | Soma IVLBoleto onde ID_Tipo_Contribuicao='OU'                  |
-| VL_Cobrado       | Somar valores vw_TAAclRemessaMensalCota IVLBoleto              |
-
-### Campos cadastrais — mantêm origem atual para ambos os tipos
-
-| Campo      | Origem                        |
-|------------|-------------------------------|
-| Nome_Sacado| vw_TAAclRemessaMensalCota.NM_Pessoa (views cadastrais mesma origem atual) |
-| Endereco   | vw_TAAclRemessaMensalCota (views cadastrais)                  |
-| Bairro     | vw_TAAclRemessaMensalCota                                     |
-| No_endereco| vw_TAAclRemessaMensalCota                                     |
-| Nm_cidade  | vw_TAAclRemessaMensalCota                                     |
-| Id_UF      | vw_TAAclRemessaMensalCota                                     |
-| Complemento| vw_TAAclRemessaMensalCota                                     |
-| CEP        | vw_TAAclRemessaMensalCota                                     |
+1. `tp_movimento_cobranca` é **ignorado** quando `tp_cobranca=P`
+2. União para `tp_cobranca=T` via `.Concat().ToList()` — sem foreach duplo
+3. Extrair fluxo mensal existente para método privado `GetMensais()`
+   para deixar o switch limpo
+4. Campos exclusivos de avulso retornam `string.Empty` nos registros mensais
+5. View `vw_TAAclCobrancasAvulsas` já existe — não criar nada no banco
+6. Não alterar comportamento do tipo `P`
+7. Padrão obrigatório: `AsNoTracking()`, `AsQueryable()`, `async/await`
+8. `[ExcludeFromCodeCoverage]` já está no Repository — manter
 
 ---
 
-## 5. Campos Novos Exclusivos de Avulso
-Para cobranças mensais (P), retornam em branco.
+## 5. Critérios de Aceite
 
-| Campo           | Tipo   | Origem Avulso (A)                                   |
-|-----------------|--------|-----------------------------------------------------|
-| ID_CD_Movto_Fin | string | vw_TAAclCobrancasAvulsas.ID_CD_Movto_Fin            |
-| NM_CD_Movto_Fin | string | vw_TAAclCobrancasAvulsas.NM_CD_Movto_Fin            |
-| DS_Parcela      | string | vw_TAAclCobrancasAvulsas.DS_Parcela                 |
-
----
-
-## 6. Regras de Implementação
-
-1. **Ordem e contrato** de campos de entrada/saída preservados conforme documentação original.
-2. `tp_movimento_cobranca` é **ignorado** quando `tp_cobranca=P`.
-3. Quando `tp_cobranca=T`, o retorno é a **união lógica**:
-   - Registros mensais preenchidos pelas views de mensal
-   - Registros avulsos preenchidos pela vw_TAAclCobrancasAvulsas
-   - Campos exclusivos de avulso ficam **em branco** nos registros mensais
-4. Paginação deve considerar o total combinado quando `tp_cobranca=T`.
-5. Não alterar comportamento existente do tipo P.
-6. Seguir padrão de código do projeto (async/await, nomenclatura, estrutura de pastas).
-7. A view `vw_TAAclCobrancasAvulsas` já existe no banco — não criar views novas.
-
----
-
-## 7. Critérios de Aceite
-
-- `tp_cobranca=P` → retorna apenas mensais, sem regressão no comportamento atual
-- `tp_cobranca=A` → retorna apenas avulsas, campos exclusivos preenchidos, campos mensais em branco/0
-- `tp_cobranca=T` → retorna mensais + avulsas, paginados corretamente
-- Campos exclusivos de avulso (ID_CD_Movto_Fin, NM_CD_Movto_Fin, DS_Parcela) presentes no DTO de saída
-- `tp_movimento_cobranca` filtra corretamente apenas para A e T
+- `tp_cobranca=P` → apenas mensais, zero regressão
+- `tp_cobranca=A` → apenas avulsas, campos mapeados corretamente
+- `tp_cobranca=T` → mensais + avulsas via Concat, paginação correta
+- Campos `IdCdMovtoFin`, `NmCdMovtoFin`, `DsParcela` presentes no response
+- `tp_movimento_cobranca` filtra apenas para `A` e `T`
 - Nenhum campo do contrato original alterado ou removido
+- Build sem erros, sem warnings novos
