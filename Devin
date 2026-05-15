@@ -1,0 +1,129 @@
+## Objetivo
+Estender o endpoint GET /cobrancas_emitidas para suportar cobranças 
+Avulsas, mantendo compatibilidade total com o contrato atual.
+
+---
+
+## 1. Contexto da Arquitetura
+O projeto segue o padrão Adapter → Facade → Repository com Translator/Mapper.
+Arquivos principais:
+- CobrancasEmitidasAdapter.cs
+- CobrancasEmitidasFacade.cs
+- CobrancasEmitidasRepository.cs (ou similar)
+- CobrancasEmitidasDto.cs
+- MovimentoCobrancaConverter.cs (Translator/Mapper)
+
+---
+
+## 2. Parâmetros de Entrada (sem alteração de contrato)
+
+| Parâmetro            | Tipo    | Obrigatório | Regra/Domínio                                                                 |
+|----------------------|---------|-------------|-------------------------------------------------------------------------------|
+| id_cota              | int[]   | N           | Lista de até 50 id_cota                                                       |
+| parcela              | smallint| N           | Número da parcela a pesquisar                                                 |
+| tp_cobranca          | string  | N           | T=todos (default), P=Parcela/mensal, A=Avulso                                 |
+| num_page             | int     | N           | Default 1                                                                     |
+| size_page            | int     | N           | Default 15                                                                    |
+| tp_movimento_cobranca| string  | N           | Aplicável apenas quando tp_cobranca=A ou P. Valores por tipo abaixo:          |
+|                      |         |             | P: ID_CD_MOVTO_FIN = '0010'                                                   |
+|                      |         |             | L Lançe → 0410, 0420, 0430, 0610, 0620, 0630, 1110                           |
+|                      |         |             | A Antecipação → 0810, 1010                                                    |
+|                      |         |             | Q Quitação → 1120                                                             |
+|                      |         |             | T Tarifas → 1660,1670,1980,1750,1790,1950,1990,1710,1960,1970                 |
+|                      |         |             | O Outros → diferente de todos acima                                           |
+
+---
+
+## 3. Regra de Seleção por tp_cobranca
+
+| tp_cobranca | Fonte de dados                                          |
+|-------------|---------------------------------------------------------|
+| P           | vw_TAAclRemessaMensalCota + views auxiliares (atual)    |
+| A           | vw_TAAclCobrancasAvulsas                                |
+| T (default) | União das duas fontes acima                             |
+
+---
+
+## 4. Parâmetros de Saída — Mapeamento por Origem
+
+### Campos compartilhados (P e A)
+
+| Campo              | Tipo     | Origem Mensal (P)                              | Origem Avulso (A)                          |
+|--------------------|----------|------------------------------------------------|--------------------------------------------|
+| tp_cobranca        | string   | Derivado do request                            | Derivado do request                        |
+| DT_Vencimento      | datetime | Vw_TaaclParcelas                               | vw_TAAclCobrancasAvulsas.DT_Vencimento     |
+| NO_Parcela         | string   | vw_TAAclRemessaMensalCota.NO_Parcela           | (em branco)                                |
+| CD_InscricaoNacional| varchar | vw_TAAclRemessaMensalCota                      | vw_TAAclPessoas (CPF/CNPJ na data emissão) |
+| DT_Documento       | datetime | vw_TAAclDemonstrativoGrupo.dt_emissao          | vw_TAAclCobrancasAvulsas.DH_Inclusao       |
+| NO_Documento       | string   | vw_TAAclRemessaMensalCota.no_identificador     | vw_TAAclCobrancasAvulsas.NO_Documento      |
+| DT_Processamento   | datetime | vw_TAAclDemonstrativoGrupo.dt_emissao          | vw_TAAclCobrancasAvulsas.DH_Inclusao       |
+| Nosso_Numero       | string   | vw_TAAclRemessaMensalCota                      | vw_TAAclCobrancasAvulsas.Nosso_Numero      |
+| NO_Carteira        | int      | vw_TAAclRemessaMensalCota.no_carteira_impres.. | vw_TAAclCobrancasAvulsas.NO_Carteira_Impresa_Boleto |
+| VL_Documento       | decimal  | Somar vw_TAAclRemessaMensalCota IVLBoleto      | vw_TAAclCobrancasAvulsas.VL_Documento      |
+| Dt_Permanencia     | datetime | vw_TAAclRemessaMensalCota                      | vw_TAAclCobrancasAvulsas.DT_Permanencia    |
+| Linha_Digitavel    | string   | vw_TAAclRemessaMensalCota                      | vw_TAAclCobrancasAvulsas.Linha_Digitavel   |
+| CD_Barra           | string   | vw_TAAclRemessaMensalCota                      | vw_TAAclCobrancasAvulsas.CD_Barra          |
+| Mensagem_Recibo    | string   | vw_TAAclRemessaMensalCota                      | Concatenar: Mensagem_Compensacao + Mensagem_Recibo_002 + Mensagem_Recibo_003 |
+
+### Campos com valor fixo 0 para Avulso
+
+| Campo            | Origem Mensal (P)                                              |
+|------------------|----------------------------------------------------------------|
+| VL_Fundo_Comum   | Soma IVLBoleto onde ID_Tipo_Contribuicao='FC'                  |
+| VL_Fundo_Reserva | Soma IVLBoleto onde ID_Tipo_Contribuicao='FR'                  |
+| VL_Taxa_Adm      | Soma IVLBoleto onde ID_Tipo_Contribuicao='TA'                  |
+| VL_Seguro        | Soma IVLBoleto onde ID_Tipo_Contribuicao='SG'                  |
+| VL_Multa_Juros   | Soma IVLBoleto onde ID_Tipo_Contribuicao='MJ'                  |
+| VL_Diferenca_Parcela | Soma IVLBoleto onde ID_Tipo_Contribuicao='DP'              |
+| VL_Outros        | Soma IVLBoleto onde ID_Tipo_Contribuicao='OU'                  |
+| VL_Cobrado       | Somar valores vw_TAAclRemessaMensalCota IVLBoleto              |
+
+### Campos cadastrais — mantêm origem atual para ambos os tipos
+
+| Campo      | Origem                        |
+|------------|-------------------------------|
+| Nome_Sacado| vw_TAAclRemessaMensalCota.NM_Pessoa (views cadastrais mesma origem atual) |
+| Endereco   | vw_TAAclRemessaMensalCota (views cadastrais)                  |
+| Bairro     | vw_TAAclRemessaMensalCota                                     |
+| No_endereco| vw_TAAclRemessaMensalCota                                     |
+| Nm_cidade  | vw_TAAclRemessaMensalCota                                     |
+| Id_UF      | vw_TAAclRemessaMensalCota                                     |
+| Complemento| vw_TAAclRemessaMensalCota                                     |
+| CEP        | vw_TAAclRemessaMensalCota                                     |
+
+---
+
+## 5. Campos Novos Exclusivos de Avulso
+Para cobranças mensais (P), retornam em branco.
+
+| Campo           | Tipo   | Origem Avulso (A)                                   |
+|-----------------|--------|-----------------------------------------------------|
+| ID_CD_Movto_Fin | string | vw_TAAclCobrancasAvulsas.ID_CD_Movto_Fin            |
+| NM_CD_Movto_Fin | string | vw_TAAclCobrancasAvulsas.NM_CD_Movto_Fin            |
+| DS_Parcela      | string | vw_TAAclCobrancasAvulsas.DS_Parcela                 |
+
+---
+
+## 6. Regras de Implementação
+
+1. **Ordem e contrato** de campos de entrada/saída preservados conforme documentação original.
+2. `tp_movimento_cobranca` é **ignorado** quando `tp_cobranca=P`.
+3. Quando `tp_cobranca=T`, o retorno é a **união lógica**:
+   - Registros mensais preenchidos pelas views de mensal
+   - Registros avulsos preenchidos pela vw_TAAclCobrancasAvulsas
+   - Campos exclusivos de avulso ficam **em branco** nos registros mensais
+4. Paginação deve considerar o total combinado quando `tp_cobranca=T`.
+5. Não alterar comportamento existente do tipo P.
+6. Seguir padrão de código do projeto (async/await, nomenclatura, estrutura de pastas).
+7. A view `vw_TAAclCobrancasAvulsas` já existe no banco — não criar views novas.
+
+---
+
+## 7. Critérios de Aceite
+
+- `tp_cobranca=P` → retorna apenas mensais, sem regressão no comportamento atual
+- `tp_cobranca=A` → retorna apenas avulsas, campos exclusivos preenchidos, campos mensais em branco/0
+- `tp_cobranca=T` → retorna mensais + avulsas, paginados corretamente
+- Campos exclusivos de avulso (ID_CD_Movto_Fin, NM_CD_Movto_Fin, DS_Parcela) presentes no DTO de saída
+- `tp_movimento_cobranca` filtra corretamente apenas para A e T
+- Nenhum campo do contrato original alterado ou removido
