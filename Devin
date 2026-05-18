@@ -1,8 +1,138 @@
-"No worker ua2-acl-contabilizacoes-newcon estamos tendo OutOfMemoryException e max.poll.interval.ms exceeded em produção com volumes de 400k a 1M de registros.
-Analise todo o código do worker e faça as correções necessárias para resolver esses dois problemas. Pontos que já identificamos:
+## Correção — Paginação para TipoCobranca="T"
 
-Remover o .ToList() no mapeamento de eventos no DisponibilizarContabilizacaoWorkerHandler.cs e adicionar GC.Collect() após publicar cada lote
-Publicar em chunks de 1.000 no ProcessoContabilizacaoService.cs em vez de todos de uma vez
-Adicionar MaxPollIntervalMs: 600000, SessionTimeoutMs: 60000 e MaxPollRecords: 1 na ConsumerConfiguration do appsettings.json em todos os ambientes
+### Problema
+Quando tp_cobranca=T, buscar sizePage itens de cada fonte 
+separadamente e depois concatenar resulta em até 2×sizePage 
+itens por página, quebrando a paginação.
 
-Mas sinta-se livre para identificar outros problemas relacionados a memória ou performance que encontrar no código, como outros .ToList() desnecessários, coleções que crescem sem ser liberadas, ou configurações inadequadas para o volume processado."
+### Solução
+Para tp_cobranca=T, buscar TODAS as entidades sem paginação 
+de ambas as fontes, concatenar, e então paginar o conjunto 
+combinado na memória.
+
+---
+
+### 1. Repository — adicionar versões sem paginação
+
+```csharp
+// Mensal sem paginação — usado apenas para tp_cobranca=T
+public async Task<List<VwTaAclRemessaMensalCota>> GetRemessaMensalCotaTodos(
+    List<int> id_cota, short? parcela)
+{
+    var query = _dbContext.VwTaAclRemessaMensalCota.AsQueryable();
+    query = query.Where(_ => id_cota.Contains(_.IdCota));
+    if (parcela.HasValue)
+        query = query.Where(_ => _.NoParcela == parcela);
+    return await query
+        .OrderBy(_ => _.IdCota).ThenBy(_ => _.NoParcela)
+        .AsNoTracking().ToListAsync();
+}
+
+// Avulso sem paginação — usado apenas para tp_cobranca=T
+public async Task<List<VwTaAclCobrancasAvulsas>> GetCobrancasAvulsasTodos(
+    List<int> id_cota)
+{
+    var query = _dbContext.VwTaAclCobrancasAvulsas.AsQueryable();
+    query = query.Where(_ => id_cota.Contains(_.IdCota));
+    return await query
+        .OrderBy(_ => _.IdCota)
+        .AsNoTracking().ToListAsync();
+}
+```
+
+### 2. ICobrancasEmitidasRepository — adicionar ao contrato
+```csharp
+Task<List<VwTaAclRemessaMensalCota>> GetRemessaMensalCotaTodos(
+    List<int> id_cota, short? parcela);
+Task<List<VwTaAclCobrancasAvulsas>> GetCobrancasAvulsasTodos(
+    List<int> id_cota);
+```
+
+### 3. Facade — método privado GetTodos
+
+```csharp
+private async Task<List<CobrancasEmitidas>> GetTodos(
+    GetCobrancasEmitidasRequest request, int numPage, int sizePage)
+{
+    // Busca sem paginação nas duas fontes
+    var mensais = await GetMensaisSemPaginacao(request);
+    var avulsas = await GetAvulsasSemPaginacao(request);
+
+    // Pagina o conjunto combinado na memória
+    return mensais
+        .Concat(avulsas)
+        .Skip((numPage - 1) * sizePage)
+        .Take(sizePage)
+        .ToList();
+}
+
+private async Task<List<CobrancasEmitidas>> GetMensaisSemPaginacao(
+    GetCobrancasEmitidasRequest request)
+{
+    var remessaCota = await _repo.GetRemessaMensalCotaTodos(
+        request.IdCota, request.Parcela);
+
+    var idConco021A  = remessaCota.Select(_ => _.IdConco021A).ToList();
+    var idAssembleia = remessaCota.Select(_ => _.IdAssembleia).ToList();
+
+    var parcelas           = await _repo.GetParcelas(request.IdCota, request.Parcela);
+    var demonstrativoGrupo = await _repo.GetDemonstrativoGrupo(idAssembleia);
+    var remessaMensalVlBoleto = await _repo.GetRemessaMensalVlBoleto(idConco021A);
+
+    var resultado = new List<CobrancasEmitidas>();
+    foreach (var cota in remessaCota)
+    {
+        var parcela = parcelas.FirstOrDefault(_ =>
+            _.IdCota == cota.IdCota && _.Parcela == cota.NoParcela);
+        var grupo  = demonstrativoGrupo.FirstOrDefault(_ =>
+            _.IdAssembleia == cota.IdAssembleia);
+        var boleto = remessaMensalVlBoleto
+            .Where(_ => _.IdConco021A == cota.IdConco021A).ToList();
+
+        resultado.Add(MapearCobrancasEmitidas(request, cota, parcela, grupo, boleto));
+    }
+    return resultado;
+}
+
+private async Task<List<CobrancasEmitidas>> GetAvulsasSemPaginacao(
+    GetCobrancasEmitidasRequest request)
+{
+    var avulsas = await _repo.GetCobrancasAvulsasTodos(request.IdCota);
+    return avulsas
+        .Select(a => MapearCobrancasAvulsas(request, a))
+        .ToList();
+}
+```
+
+### 4. Facade — switch final corrigido
+
+```csharp
+var ret = request.TipoCobranca switch
+{
+    "A" => await GetAvulsas(request, numPage, sizePage),
+    "T" => await GetTodos(request, numPage, sizePage),
+    _   => await GetMensais(request, numPage, sizePage),
+};
+```
+
+### 5. GetPaginacao — sem alteração
+O count combinado para "T" já estava correto:
+```csharp
+Qtdreg = request.TipoCobranca switch
+{
+    "A" => await _repo.GetCountAvulsas(request.IdCota),
+    "T" => await _repo.GetCount(request.IdCota, request.Parcela)
+         + await _repo.GetCountAvulsas(request.IdCota),
+    _   => await _repo.GetCount(request.IdCota, request.Parcela),
+},
+```
+
+---
+
+### Resumo dos métodos por TipoCobranca
+
+| tp_cobranca | Repository usado                              | Paginação      |
+|-------------|-----------------------------------------------|----------------|
+| P           | GetRemessaMensalCota (com paginação)          | No banco       |
+| A           | GetCobrancasAvulsas (com paginação)           | No banco       |
+| T           | GetRemessaMensalCotaTodos + GetCobrancasAvulsasTodos (sem paginação) | Na memória após Concat |
