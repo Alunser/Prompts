@@ -1,18 +1,23 @@
- worker está com thread pool starvation em produção mas não em dev com o mesmo volume. A causa é o producer.ProduceAsync(...).Result bloqueando threads de forma síncrona dentro do Parallel.ForEach.
-Converter TryPublishWithRetry para async genuíno e substituir o Parallel.ForEach por Task.WhenAll com SemaphoreSlim para controlar paralelismo sem bloquear threads:
+No ProcessoContabilizacaoService.cs, o método TryPublishWithRetry usa producer.ProduceAsync(...).Result na linha 204, bloqueando threads de forma síncrona dentro do Parallel.ForEach. Isso causa thread pool starvation em produção.
+Fazer as seguintes alterações:
+1. Converter TryPublishWithRetry de bool para Task<bool> e trocar .Result por await:
+csharpprivate async Task<bool> TryPublishWithRetryAsync(...)
+{
+    var result = await producer.ProduceAsync(topicName, message, stoppingToken);
+}
+2. Substituir o Parallel.ForEach por Task.WhenAll com SemaphoreSlim(20):
 csharpvar semaphore = new SemaphoreSlim(20);
-var tasks = chunk.Select(async item =>
+var tasks = chunkList.Select(async item =>
 {
     await semaphore.WaitAsync();
     try
     {
-        var published = await TryPublishWithRetryAsync(
-            producer, topicConfiguration.Name, 
-            msg, item.IdEvento, stoppingToken);
+        // monta headers, value, msg (manter código existente)
+        var published = await TryPublishWithRetryAsync(producer, topicConfiguration.Name, msg, item.IdEvento, stoppingToken);
         if (published) Interlocked.Increment(ref successCount);
         else Interlocked.Increment(ref failedCount);
     }
     finally { semaphore.Release(); }
 });
 await Task.WhenAll(tasks);
-E converter TryPublishWithRetry para async/await removendo o .Result em producer.ProduceAsync(...).Result
+Manter o Task.Run externo e o chunking de 1.000. Isso resolve o thread pool starvation sem perder o paralelismo.
