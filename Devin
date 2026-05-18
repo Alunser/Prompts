@@ -1,10 +1,18 @@
-Ajuste urgente para o Devin
-
-"O worker caiu de 1.000 req/s para 230 req/s após o fix. Preciso recuperar a performance sem voltar o OOM. Ajustar:
-
-Remover todos os GC.Collect() explícitos — o GC do .NET é mais eficiente gerenciando sozinho
-Aumentar chunk de 1.000 para 5.000 no ProcessoContabilizacaoService.cs
-Remover ou aumentar MaxPollRecords de 1 para 10
-Manter o MaxDegreeOfParallelism: 20 e o MaxPollIntervalMs: 600000
-
-O objetivo é voltar para ~1.000 req/s sem estourar memória. As correções de memória que resolvem o OOM são: remoção do .ToList(), ConcurrentBag → int e LimparEventos() — essas devem ser mantidas."
+ worker está com thread pool starvation em produção mas não em dev com o mesmo volume. A causa é o producer.ProduceAsync(...).Result bloqueando threads de forma síncrona dentro do Parallel.ForEach.
+Converter TryPublishWithRetry para async genuíno e substituir o Parallel.ForEach por Task.WhenAll com SemaphoreSlim para controlar paralelismo sem bloquear threads:
+csharpvar semaphore = new SemaphoreSlim(20);
+var tasks = chunk.Select(async item =>
+{
+    await semaphore.WaitAsync();
+    try
+    {
+        var published = await TryPublishWithRetryAsync(
+            producer, topicConfiguration.Name, 
+            msg, item.IdEvento, stoppingToken);
+        if (published) Interlocked.Increment(ref successCount);
+        else Interlocked.Increment(ref failedCount);
+    }
+    finally { semaphore.Release(); }
+});
+await Task.WhenAll(tasks);
+E converter TryPublishWithRetry para async/await removendo o .Result em producer.ProduceAsync(...).Result
