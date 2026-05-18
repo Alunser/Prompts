@@ -1,366 +1,297 @@
-## Objetivo
-Estender o endpoint GET /cobrancas_emitidas para suportar cobranças 
-Avulsas, mantendo compatibilidade total com o contrato atual.
 
----
+Você disse: Estou tomando esse erro no meu worker
+20260518_094248595933953556279508.jpg
+Estou tomando esse erro no meu worker
 
-## 1. Arquitetura
-Padrão: Adapter → Facade → Repository com Mapper estático.
-Namespace base: Facade.Repositories / Domain.Utils / Domain.Models
+09:43
+Claude respondeu: Análise dos Erros no Worker
+Análise dos Erros no Worker
+Pelos logs do Datadog, seu worker ua2-acl-contabilizacoes-newcon está apresentando dois erros distintos que se alternam:
 
----
+Erro 1 — OutOfMemoryException
+[Worker] ERROR: ProcessWorker | Error: One or more errors occurred.
+(Exception of type 'System.OutOfMemoryException' was thrown.)
+O que significa: O worker está ficando sem memória durante o processamento. Provavelmente acumulando objetos em memória sem liberar (memory leak) ou processando um volume muito grande de dados de uma vez.
 
-## 2. O que JÁ FOI FEITO (não alterar)
+O que verificar:
 
-### CobrancasEmitidasDto.cs
-```csharp
-public class CobrancasEmitidasDto
-{
-    [FromQuery(Name = "id_cota")]
-    public List<int> IdCota { get; set; }
+Tamanho do lote (batch) que está sendo processado
+Se há algum List ou coleção crescendo indefinidamente
+Configuração de memória do container/pod
+Erro 2 — ConsumeException (max.poll.interval.ms exceeded)
+[Worker] ERROR: ConsumeException | Error: Local: Maximum application poll interval (max.poll.interval.ms) exceeded
+O que significa: O consumer Kafka está demorando mais do que o tempo configurado em max.poll.interval.ms para processar uma mensagem. O Kafka então entende que o consumer "morreu" e faz rebalanceamento.
 
-    [FromQuery(Name = "parcela")]
-    public short? Parcela { get; set; }
+O que verificar:
 
-    [FromQuery(Name = "tp_cobranca")]
-    public string TipoCobranca { get; set; } = "P";
+Valor atual do max.poll.interval.ms (padrão: 300.000ms = 5 min)
+Tempo médio de processamento de cada mensagem
+Se o OutOfMemoryException está causando lentidão que dispara esse timeout
+Relação entre os dois erros
+Os erros provavelmente estão encadeados: o OOM deixa o processamento lento → o Kafka timeout estoura → o consumer é desconectado → recomeça → repete o ciclo.
 
-    [FromQuery(Name = "tp_movimento_cobranca")]
-    public string TipoMovimentoCobranca { get; set; }
+Sugestões imediatas:
 
-    [FromQuery(Name = "num_page")]
-    [DefaultValue(1)]
-    public int NumPage { get; set; } = 1;
+Aumentar a memória alocada ao worker
+Reduzir o tamanho do batch processado por poll
+Aumentar o max.poll.interval.ms como paliativo
+Verificar se há memory leak no ContabilizacoesNewconWorker
+Quer ajuda para investigar o código do worker ou ajustar as configurações do Kafka?
 
-    [FromQuery(Name = "size_page")]
-    [DefaultValue(15)]
-    public int SizePage { get; set; } = 15;
+Você disse: Oq eu peço para o devin analisar?
+Oq eu peço para o devin analisar??
+
+09:44
+Claude respondeu: O que pedir ao Devin para analisar
+O que pedir ao Devin para analisar
+1. Memory Leak no Worker
+Analise o ContabilizacoesNewconWorker e identifique possíveis 
+memory leaks. Verifique coleções que crescem sem ser liberadas, 
+objetos não dispostos (IDisposable sem using/Dispose), e 
+acúmulo de dados entre iterações do loop de processamento.
+2. Configuração do Kafka Consumer
+Revise as configurações do Kafka Consumer no worker 
+ua2-acl-contabilizacoes-newcon, especialmente:
+- max.poll.interval.ms
+- max.poll.records
+- session.timeout.ms
+Compare com o tempo médio de processamento de cada mensagem.
+3. Tamanho do Batch
+Verifique se o worker está processando mensagens em lote 
+muito grande por ciclo de poll, causando consumo excessivo 
+de memória e estouro do poll interval do Kafka.
+Prompt completo (copie e cole direto no Devin)
+"No worker ContabilizacoesNewconWorker estamos tendo dois erros em produção: System.OutOfMemoryException durante o ProcessWorker e ConsumeException por max.poll.interval.ms exceeded no Kafka. Analise o código do worker buscando: memory leaks, objetos não descartados, tamanho de batch excessivo e configurações do consumer Kafka. Proponha correções."
+
+20260518_0944478991109588782846644.jpg
+20260518_0945055505822226830869600.jpg
+20260518_0945354213204657303339139.jpg
+20260518_0948153482672647491060677.jpg
+09:48
+Claude respondeu: Análise do Código — Problemas Identificados
+Análise do Código — Problemas Identificados
+Agora com o código em mãos, consigo ver os problemas claramente:
+
+🔴 Problema Principal — DefaultPageSize = 10000 (Imagem 4)
+csharp
+private const int DefaultPageSize = 10000;
+O repositório busca 10.000 registros por vez do banco. Com o mapeamento massivo de campos que vejo na Imagem 2 (são ~50+ campos por registro), isso gera um objeto gigante em memória → causa direta do OutOfMemoryException.
+
+🔴 Problema 2 — Parallel.ForEach sem limite real (Imagem 2)
+csharp
+int maxDegreeOfParallelism = _kafkaConfiguration
+    .ProducerConfiguration.MaxDegreeOfParallelism;
+
+Parallel.ForEach(loteWrapper.EventosContabilizacoes, 
+    parallelOptions, item => { ... })
+Processa os 10.000 registros em paralelo publicando no Kafka. Se MaxDegreeOfParallelism for alto, multiplica o consumo de memória.
+
+🔴 Problema 3 — while(true) sem paginação eficiente (Imagem 1)
+O loop busca tudo, processa tudo e só para quando a lista vem vazia — sem controle de memória entre iterações.
+
+O que pedir ao Devin
+"No ContabilizacoesNewconWorker, o DefaultPageSize está em 10.000 registros por página no ContabilizacaoFluirRepository. Com o volume de campos mapeados por evento (~50 campos), isso causa OutOfMemoryException. Reduza o DefaultPageSize para 500 ou 1000, valide se o MaxDegreeOfParallelism do Kafka Producer está configurado com um valor razoável (sugestão: máximo 10), e garanta que a memória seja liberada entre as iterações do while(true) no handler."
+
+20260518_0949331285329531460080132.jpg
+20260518_0949481448202966802964893.jpg
+20260518_0950074864275427184379244.jpg
+09:50
+Claude respondeu: Achei o Culpado Principal!
+Achei o Culpado Principal! 🎯
+🔴 MaxDegreeOfParallelism: 60 — Este é o problema! (Imagem 3)
+json
+"ProducerConfiguration": {
+    "BatchNumMessages": 100,
+    "LingerMs": 5,
+    "Acks": "All",
+    "MaxDegreeOfParallelism": 60,  // ← AQUI
+    ...
 }
-```
+Com DefaultPageSize = 10000 registros e 60 threads paralelas, cada uma carregando ~50 campos por evento = memória explodindo.
 
-### MovimentoCobrancaConverter.cs
-```csharp
-public static class MovimentoCobrancaConverter
+Contexto completo do problema
+Config	Valor atual	Problema
+DefaultPageSize	10.000	Carrega tudo na memória
+MaxDegreeOfParallelism	60	60 threads simultâneas
+BatchNumMessages	100	Ok
+batchSize CotaRepo	1.000	Ok isolado
+Prompt para o Devin
+"No appsettings.json do worker ua2-acl-contabilizacoes-newcon, o MaxDegreeOfParallelism está em 60 e o DefaultPageSize no ContabilizacaoFluirRepository está em 10.000. Isso causa OutOfMemoryException porque o worker tenta processar 10k registros com 60 threads paralelas simultaneamente.
+
+Faça as seguintes correções:
+
+Reduzir DefaultPageSize de 10.000 para 500
+Reduzir MaxDegreeOfParallelism de 60 para 10
+Garantir que o GC.Collect() ou liberação de memória ocorra entre iterações do while(true) no handler"
+Você disse: Mas reduzir de 10 mil pra 500 n vai ser muito lento?
+Mas reduzir de 10 mil pra 500 n vai ser muito lento???
+
+09:53
+Claude respondeu: Boa pergunta!
+Boa pergunta! Depende do volume atual.
+Vamos pensar na matemática
+Se hoje processa 10.000 registros com 60 threads, e você mudar para 500 registros com 10 threads:
+
+O throughput cai, mas o worker roda continuamente sem crashar
+Um worker crashando por OOM processa zero registros enquanto reinicia
+Sugestão mais equilibrada
+Em vez de ir direto para 500, tente uma redução gradual:
+
+Cenário	PageSize	Parallelism	Risco
+Atual (com crash)	10.000	60	OOM
+Conservador	500	10	Lento
+Recomendado	2.000	20	Equilibrado
+Intermediário	1.000	15	Seguro
+O que verificar antes de decidir
+Você precisa saber:
+
+Quantos registros chegam por ciclo normalmente? (ver no Datadog — campo TotalRegistros nos logs)
+Qual o SLA de processamento? Tem janela de tempo definida?
+O worker tem réplicas? Se rodar 2 pods com PageSize 2.000 cada, o throughput total se mantém
+Minha recomendação
+Peça ao Devin para deixar esses valores configuráveis via appsettings (já estão, na verdade) e subir com 2.000 / parallelism 20 primeiro, monitorar no Datadog por 30 minutos e ajustar se necessário.
+
+Você disse: Normalmente chega em torno de 400 mil mas pode ocorrer registros de 1 milhao
+Normalmente chega em torno de 400 mil mas pode ocorrer registros de 1 milhao
+
+09:54
+Claude respondeu: Com esse volume, a análise muda bastante!
+Com esse volume, a análise muda bastante!
+O problema real não é o PageSize — é a arquitetura do loop
+Com 1 milhão de registros e DefaultPageSize = 10.000, o worker faz 100 iterações do while(true). O problema é que ele carrega tudo numa lista antes de publicar no Kafka.
+
+Recomendação para esse volume
+Config	Atual	Recomendado
+DefaultPageSize	10.000	5.000
+MaxDegreeOfParallelism	60	30
+Redução moderada, não drástica. Com 1M de registros:
+
+10k pages = 100 iterações
+5k pages = 200 iterações — ainda rápido
+Mas o problema maior é esse trecho (Imagem 1)
+csharp
+var eventosContabilizacaoList = contabilizacaoFluirList
+    .AsParallel()
+    .WithDegreeOfParallelism(10)
+    .Select(evento => { ... })
+    .ToList(); // ← Materializa TUDO na memória
+O .ToList() no final segura todos os 10k objetos mapeados (com 50 campos cada) na memória antes de publicar qualquer coisa no Kafka.
+
+Prompt para o Devin
+"O worker processa entre 400k e 1 milhão de registros por execução. Os ajustes necessários são:
+
+Reduzir DefaultPageSize de 10.000 para 5.000 e MaxDegreeOfParallelism de 60 para 30
+Remover o .ToList() no mapeamento de eventosContabilizacaoList e usar streaming/yield para não materializar todos os objetos em memória de uma vez
+Publicar no Kafka em chunks menores dentro do próprio loop, em vez de acumular tudo no LoteWrapper antes de publicar"
+Você disse: Consegue mandar i código junto?
+Consegue mandar i código junto???
+
+09:55
+Claude respondeu: Consigo sim!
+Consigo sim! Mas precisaria ver o código completo dos arquivos para reescrever com precisão. Pelas fotos consigo ler parcialmente, mas algumas linhas ficaram cortadas ou desfocadas.
+
+Você consegue me mandar:
+
+O conteúdo do DisponibilizarContabilizacaoWorkerHandler.cs (Imagem 1 da primeira série)
+O conteúdo do ProcessoContabilizacaoService.cs (Imagem 2 da primeira série — o PublicarContabilizacaoAsync)
+Pode ser colando o texto aqui mesmo ou tirando fotos mais próximas das partes críticas. Com isso eu monto o prompt completo com o código corrigido para você colar direto no Devin.
+
+20260518_0956114205945538882905190.jpg
+20260518_0956346588570378874227017.jpg
+20260518_0956436024110973946757784.jpg
+09:56
+Claude respondeu: Agora consigo ver o código completo!
+Agora consigo ver o código completo! Aqui está o prompt completo para o Devin com o código corrigido:
+
+Prompt para o Devin
+"No worker ua2-acl-contabilizacoes-newcon, estamos tendo OutOfMemoryException e max.poll.interval.ms exceeded no Kafka. O problema é que o MaxDegreeOfParallelism está em 60 no appsettings.json e o código materializa todos os registros em memória antes de publicar. Faça as seguintes correções:
+
+1. appsettings.json — altere:
+
+json
+"MaxDegreeOfParallelism": 60  →  "MaxDegreeOfParallelism": 20
+2. DisponibilizarContabilizacaoWorkerHandler.cs — remova o .ToList() e o foreach separado, publicando direto no lote:
+
+Código atual:
+
+csharp
+var eventoContabilizacaoList = contabilizacaoFluirList
+    .AsParallel()
+    .WithDegreeOfParallelism(10)
+    .Select(evento =>
+    {
+        var cotaDto = cotaList.TryGetValue(evento.IdCota, out var cota) ? cota : null;
+        var grupoDto = grupoList.TryGetValue(evento.IdGrupo, out var grupo) ? grupo : null;
+        return EventoContabilizacaoWrapper.Criar(evento, cotaDto, grupoDto);
+    })
+    .ToList();
+
+var lote = new LoteWrapper(request.Id, request.DataBatch, request.DataProcessamento, totalRegistro);
+
+foreach (var eventoContabil in eventoContabilizacaoList)
 {
-    private static readonly Dictionary<string, List<int>> CodigosPorTipo =
-        new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase)
-    {
-        { "P", new List<int> { 10 } },
-        { "L", new List<int> { 410, 420, 430, 610, 620, 630, 1110 } },
-        { "A", new List<int> { 810, 1010 } },
-        { "Q", new List<int> { 1120 } },
-        { "T", new List<int> { 1660,1670,1980,1750,1790,1950,1990,1710,1960,1970 } },
-        { "O", new List<int>() }
-    };
-
-    public static List<int> ObterCodigosPorTipo(string tipo)
-    {
-        if (string.IsNullOrEmpty(tipo)) return new List<int>();
-
-        if (tipo.Equals("O", StringComparison.OrdinalIgnoreCase))
-            return CodigosPorTipo
-                .Where(kvp => !kvp.Key.Equals("O", StringComparison.OrdinalIgnoreCase))
-                .SelectMany(kvp => kvp.Value)
-                .Distinct()
-                .ToList();
-
-        if (CodigosPorTipo.TryGetValue(tipo.ToUpper(), out var codigos))
-            return codigos;
-
-        return new List<int>();
-    }
-}
-```
-
-### CobrancasEmitidasRepository.cs — métodos já existentes
-```csharp
-[ExcludeFromCodeCoverage]
-public class CobrancasEmitidasRepository : ICobrancasEmitidasRepository
-{
-    private readonly DbContext _dbContext;
-
-    public CobrancasEmitidasRepository(DbContext dbContext)
-        => _dbContext = dbContext;
-
-    public async Task<int> GetCount(List<int> id_cota, short? parcela)
-    {
-        var query = _dbContext.VwTaAclRemessaMensalCota.AsQueryable();
-        query = query.Where(_ => id_cota.Contains(_.IdCota));
-        if (parcela.HasValue)
-            query = query.Where(_ => _.NoParcela == parcela);
-        return await query.AsNoTracking().CountAsync();
-    }
-
-    public async Task<List<VwTaAclParcelas>> GetParcelas(
-        List<int> id_cota, short? parcela)
-    {
-        var query = _dbContext.VwTaAclParcelas.AsQueryable();
-        query = query.Where(_ => id_cota.Contains(_.IdCota));
-        if (parcela.HasValue)
-            query = query.Where(_ => _.Parcela == parcela);
-        return await query.AsNoTracking().ToListAsync();
-    }
-
-    public async Task<List<VwTaAclRemessaMensalCota>> GetRemessaMensalCota(
-        List<int> id_cota, short? parcela, int numPage, int sizePage)
-    {
-        int pular = (numPage - 1) * sizePage;
-        var query = _dbContext.VwTaAclRemessaMensalCota.AsQueryable();
-        query = query.Where(_ => id_cota.Contains(_.IdCota));
-        if (parcela.HasValue)
-            query = query.Where(_ => _.NoParcela == parcela);
-        return await query
-            .OrderBy(_ => _.IdCota).ThenBy(_ => _.NoParcela)
-            .Skip(pular).Take(sizePage)
-            .AsNoTracking().ToListAsync();
-    }
-
-    public async Task<List<VwTaAclRemessaMensalVlBoleto>> GetRemessaMensalVlBoleto(
-        List<int> IdConco021A)
-        => await _dbContext.VwTaAclRemessaMensalVlBoleto
-            .Where(_ => IdConco021A.Contains(_.IdConco021A))
-            .ToListAsync();
-
-    public async Task<List<VwTaAclDemonstrativoGrupo>> GetDemonstrativoGrupo(
-        List<int> IdAssembleia)
-        => await _dbContext.VwTaAclDemonstrativoGrupo
-            .Where(_ => IdAssembleia.Contains(_.IdAssembleia))
-            .ToListAsync();
-}
-```
-
-### MapearCobrancasEmitidas — mapper mensal já existente
-```csharp
-private static CobrancasEmitidas MapearCobrancasEmitidas(
-    GetCobrancasEmitidasRequest request,
-    VwTaAclRemessaMensalCota cota,
-    VwTaAclParcelas parcela,
-    VwTaAclDemonstrativoGrupo grupo,
-    List<VwTaAclRemessaMensalVlBoleto> boleto)
-{
-    return new CobrancasEmitidas
-    {
-        TpCobranca          = request.TipoCobranca,
-        DtVencimento        = parcela?.DtVencimento,
-        IdCota              = cota.IdCota,
-        NoParcela           = cota.NoParcela,
-        CdInscricaoNacional = cota.CdInscricaoNacional,
-        DtDocumento         = grupo?.DtEmissao,
-        NoDocumento         = string.IsNullOrEmpty(cota.NoIdentificador)
-                                ? cota.NoIdentificador
-                                : cota.NoIdentificador.Trim().Replace("\u0000", ""),
-        DtProcessamento     = grupo?.DtEmissao,
-        NossoNumero         = string.IsNullOrEmpty(cota.NossoNumero)
-                                ? cota.NossoNumero
-                                : cota.NossoNumero.Trim().Replace("\u0000", ""),
-        NoCarteira          = cota.NoCarteiraImpresaBolota,
-        VlDocumento         = boleto.Sum(_ => _.VlContribuicao),
-        VlFundoComum        = boleto.FirstOrDefault(_ =>
-                                _.IdTipoContribuicao == "FC")?.VlContribuicao ?? 0,
-        VlFundoReserva      = boleto.FirstOrDefault(_ =>
-                                _.IdTipoContribuicao == "FR")?.VlContribuicao ?? 0,
-        VlTaxaAdm           = boleto.FirstOrDefault(_ =>
-                                _.IdTipoContribuicao == "TA")?.VlContribuicao ?? 0,
-        VlSeguro            = boleto.FirstOrDefault(_ =>
-                                _.IdTipoContribuicao == "SG")?.VlContribuicao ?? 0,
-        VlMultaJuros        = boleto.FirstOrDefault(_ =>
-                                _.IdTipoContribuicao == "MJ")?.VlContribuicao ?? 0,
-        VlDiferencaParcela  = boleto.FirstOrDefault(_ =>
-                                _.IdTipoContribuicao == "DP")?.VlContribuicao ?? 0,
-        VlOutros            = boleto.FirstOrDefault(_ =>
-                                _.IdTipoContribuicao == "OU")?.VlContribuicao ?? 0,
-        VlCobrado           = boleto.Sum(_ => _.VlContribuicao),
-        NomeSacado          = string.IsNullOrEmpty(cota.NmPessoa)
-                                ? cota.NmPessoa : cota.NmPessoa.Trim(),
-        Endereco            = string.IsNullOrEmpty(cota.Endereco)
-                                ? cota.Endereco : cota.Endereco.Trim(),
-        Bairro              = string.IsNullOrEmpty(cota.Bairro)
-                                ? cota.Bairro : cota.Bairro.Trim(),
-        NoEndereco          = string.IsNullOrEmpty(cota.NoEndereco)
-                                ? cota.NoEndereco : cota.NoEndereco.Trim(),
-        NmCidade            = string.IsNullOrEmpty(cota.NmCidade)
-                                ? cota.NmCidade : cota.NmCidade.Trim(),
-        IdUf                = string.IsNullOrEmpty(cota.IdUf)
-                                ? cota.IdUf : cota.IdUf.Trim(),
-        Complemento         = string.IsNullOrEmpty(cota.Complemento)
-                                ? cota.Complemento : cota.Complemento.Trim(),
-        Cep                 = cota.Cep,
-        DtPermanencia       = cota.DtPermanencia,
-        LinhaDigitavel      = cota.LinhaDigitavel,
-        CdBarra             = cota.CdBarra,
-        MensagemRecebido    = cota.MensagemBoleto,
-        // Campos exclusivos de avulso — em branco para mensal
-        IdCdMovtoFin        = string.Empty,
-        NmCdMovtoFin        = string.Empty,
-        DsParcela           = string.Empty,
-    };
-}
-```
-
----
-
-## 3. O que PRECISA SER IMPLEMENTADO
-
-### 3.1 CobrancasEmitidas — adicionar campos novos
-```csharp
-// Exclusivos de Avulso — string.Empty para registros mensais
-public string IdCdMovtoFin { get; set; }
-public string NmCdMovtoFin { get; set; }
-public string DsParcela    { get; set; }
-```
-
-### 3.2 ICobrancasEmitidasRepository — adicionar ao contrato
-```csharp
-Task<int> GetCountAvulsas(List<int> id_cota);
-Task<List<VwTaAclCobrancasAvulsas>> GetCobrancasAvulsas(
-    List<int> id_cota, int numPage, int sizePage);
-```
-
-### 3.3 CobrancasEmitidasRepository — implementar novos métodos
-Seguir EXATAMENTE o mesmo padrão dos métodos já existentes:
-```csharp
-public async Task<int> GetCountAvulsas(List<int> id_cota)
-{
-    var query = _dbContext.VwTaAclCobrancasAvulsas.AsQueryable();
-    query = query.Where(_ => id_cota.Contains(_.IdCota));
-    return await query.AsNoTracking().CountAsync();
+    lote.AdicionarEventoContabilizacao(eventoContabil);
 }
 
-public async Task<List<VwTaAclCobrancasAvulsas>> GetCobrancasAvulsas(
-    List<int> id_cota, int numPage, int sizePage)
+var resultado = await _processoContabilizacaoService.PublicarContabilizacaoAsync(lote, cancellationToken);
+Código corrigido:
+
+csharp
+var lote = new LoteWrapper(request.Id, request.DataBatch, request.DataProcessamento, totalRegistro);
+
+foreach (var evento in contabilizacaoFluirList)
 {
-    int pular = (numPage - 1) * sizePage;
-    var query = _dbContext.VwTaAclCobrancasAvulsas.AsQueryable();
-    query = query.Where(_ => id_cota.Contains(_.IdCota));
-    return await query
-        .OrderBy(_ => _.IdCota)
-        .Skip(pular).Take(sizePage)
-        .AsNoTracking().ToListAsync();
+    var cotaDto = cotaList.TryGetValue(evento.IdCota, out var cota) ? cota : null;
+    var grupoDto = grupoList.TryGetValue(evento.IdGrupo, out var grupo) ? grupo : null;
+    var eventoContabil = EventoContabilizacaoWrapper.Criar(evento, cotaDto, grupoDto);
+    lote.AdicionarEventoContabilizacao(eventoContabil);
 }
-```
 
-### 3.4 Facade — GetPaginacao ajustado
-```csharp
-// "P" → apenas GetCount() — comportamento atual
-// "A" → apenas GetCountAvulsas()
-// "T" → GetCount() + GetCountAvulsas() somados
+var resultado = await _processoContabilizacaoService.PublicarContabilizacaoAsync(lote, cancellationToken);
+3. ProcessoContabilizacaoService.cs — no método PublicarContabilizacaoAsync, publique em chunks de 1.000 em vez de todos de uma vez:
 
-ResultPaginacao resultado = new()
+Código atual:
+
+csharp
+await Task.Run(() =>
 {
-    Qtdreg = request.TipoCobranca switch
+    Parallel.ForEach(loteWrapper.EventosContabilizacoes, parallelOptions, item =>
     {
-        "A" => await _repo.GetCountAvulsas(request.IdCota),
-        "T" => await _repo.GetCount(request.IdCota, request.Parcela)
-             + await _repo.GetCountAvulsas(request.IdCota),
-        _   => await _repo.GetCount(request.IdCota, request.Parcela),
-    },
-    NumPage  = paginacao.NumPage,
-    SizePage = paginacao.PageSize
-};
-resultado.Qtdpag = Convert.ToInt32(
-    Math.Ceiling(Convert.ToDouble(resultado.Qtdreg) / paginacao.PageSize));
-return resultado;
-```
+        if (item == null) return;
+        // ... monta headers, value, msg
+        var published = TryPublishWithRetry(producer, topicConfiguration.Name, msg, item.IdEvento, stoppingToken);
+        if (published) successIds.Add(item.IdEvento);
+        else failedIds.Add(item.IdEvento);
+    });
+}, stoppingToken);
+Código corrigido:
 
-### 3.5 Facade — GetCobrancasEmitidas ajustado
-```csharp
-var ret = request.TipoCobranca switch
+csharp
+var chunks = loteWrapper.EventosContabilizacoes
+    .Select((item, index) => new { item, index })
+    .GroupBy(x => x.index / 1000)
+    .Select(g => g.Select(x => x.item).ToList());
+
+foreach (var chunk in chunks)
 {
-    "A" => await GetAvulsas(request, resultPaginacao.NumPage, resultPaginacao.SizePage),
-    "T" => (await GetMensais(request, resultPaginacao.NumPage, resultPaginacao.SizePage))
-               .Concat(
-           await GetAvulsas(request, resultPaginacao.NumPage, resultPaginacao.SizePage))
-               .ToList(),
-    _   => await GetMensais(request, resultPaginacao.NumPage, resultPaginacao.SizePage),
-};
-
-// Extrair fluxo mensal para método privado GetMensais() 
-// com o código já existente (foreach + MapearCobrancasEmitidas)
-
-// Novo método privado GetAvulsas():
-private async Task<List<CobrancasEmitidas>> GetAvulsas(
-    GetCobrancasEmitidasRequest request, int numPage, int sizePage)
-{
-    var avulsas = await _repo.GetCobrancasAvulsas(
-        request.IdCota, numPage, sizePage);
-
-    return avulsas
-        .Select(a => MapearCobrancasAvulsas(request, a))
-        .ToList();
-}
-```
-
-### 3.6 Novo mapper para Avulso
-```csharp
-private static CobrancasEmitidas MapearCobrancasAvulsas(
-    GetCobrancasEmitidasRequest request,
-    VwTaAclCobrancasAvulsas avulsa)
-{
-    return new CobrancasEmitidas
+    await Task.Run(() =>
     {
-        TpCobranca          = request.TipoCobranca,
-        DtVencimento        = avulsa.DtVencimento,
-        IdCota              = avulsa.IdCota,
-        NoParcela           = string.Empty,
-        CdInscricaoNacional = avulsa.CdInscricaoNacional,
-        DtDocumento         = avulsa.DhInclusao,
-        NoDocumento         = avulsa.NoDocumento,
-        DtProcessamento     = avulsa.DhInclusao,
-        NossoNumero         = avulsa.NossoNumero,
-        NoCarteira          = avulsa.NoCarteiraImpresaBoleto,
-        VlDocumento         = avulsa.VlDocumento,
-        VlFundoComum        = 0,
-        VlFundoReserva      = 0,
-        VlTaxaAdm           = 0,
-        VlSeguro            = 0,
-        VlMultaJuros        = 0,
-        VlDiferencaParcela  = 0,
-        VlOutros            = 0,
-        VlCobrado           = 0,
-        NomeSacado          = avulsa.NmPessoa?.Trim(),
-        Endereco            = avulsa.Endereco?.Trim(),
-        Bairro              = avulsa.Bairro?.Trim(),
-        NoEndereco          = avulsa.NoEndereco?.Trim(),
-        NmCidade            = avulsa.NmCidade?.Trim(),
-        IdUf                = avulsa.IdUf?.Trim(),
-        Complemento         = avulsa.Complemento?.Trim(),
-        Cep                 = avulsa.Cep,
-        DtPermanencia       = avulsa.DtPermanencia,
-        LinhaDigitavel      = avulsa.LinhaDigitavel,
-        CdBarra             = avulsa.CdBarra,
-        MensagemRecebido    = string.Concat(
-                                avulsa.MensagemCompensacao,
-                                avulsa.MensagemRecibo002,
-                                avulsa.MensagemRecibo003),
-        IdCdMovtoFin        = avulsa.IdCdMovtoFin,
-        NmCdMovtoFin        = avulsa.NmCdMovtoFin,
-        DsParcela           = avulsa.DsParcela,
-    };
+        Parallel.ForEach(chunk, parallelOptions, item =>
+        {
+            if (item == null) return;
+            // ... monta headers, value, msg (manter código existente)
+            var published = TryPublishWithRetry(producer, topicConfiguration.Name, msg, item.IdEvento, stoppingToken);
+            if (published) successIds.Add(item.IdEvento);
+            else failedIds.Add(item.IdEvento);
+        });
+    }, stoppingToken);
 }
-```
+O objetivo é evitar materializar 10k objetos com 50+ campos em memória com 60 threads simultâneas. Com chunks de 1.000 e parallelism 20, o throughput se mantém para 400k-1M registros sem estourar memória."
 
----
 
-## 4. Regras Importantes
 
-1. `tp_movimento_cobranca` é **ignorado** quando `tp_cobranca=P`
-2. União para `tp_cobranca=T` via `.Concat().ToList()` — sem foreach duplo
-3. Extrair fluxo mensal existente para método privado `GetMensais()`
-   para deixar o switch limpo
-4. Campos exclusivos de avulso retornam `string.Empty` nos registros mensais
-5. View `vw_TAAclCobrancasAvulsas` já existe — não criar nada no banco
-6. Não alterar comportamento do tipo `P`
-7. Padrão obrigatório: `AsNoTracking()`, `AsQueryable()`, `async/await`
-8. `[ExcludeFromCodeCoverage]` já está no Repository — manter
 
----
 
-## 5. Critérios de Aceite
+Claude é uma IA e pode cometer erros. Por favor, verifique as respostas.
+Você atingiu seu limite de mensagens do Claude. Os limites serão redefinidos às 12:40.  Veja os detalhes do seu uso.
 
-- `tp_cobranca=P` → apenas mensais, zero regressão
-- `tp_cobranca=A` → apenas avulsas, campos mapeados corretamente
-- `tp_cobranca=T` → mensais + avulsas via Concat, paginação correta
-- Campos `IdCdMovtoFin`, `NmCdMovtoFin`, `DsParcela` presentes no response
-- `tp_movimento_cobranca` filtra apenas para `A` e `T`
-- Nenhum campo do contrato original alterado ou removido
-- Build sem erros, sem warnings novos
