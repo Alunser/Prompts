@@ -1,72 +1,8 @@
-Prompt para o Devin
+"No worker ua2-acl-contabilizacoes-newcon estamos tendo OutOfMemoryException e max.poll.interval.ms exceeded em produção com volumes de 400k a 1M de registros.
+Analise todo o código do worker e faça as correções necessárias para resolver esses dois problemas. Pontos que já identificamos:
 
-"No worker ua2-acl-contabilizacoes-newcon, estamos tendo OutOfMemoryException e max.poll.interval.ms exceeded no Kafka. O problema é que o MaxDegreeOfParallelism está em 60 no appsettings.json e o código materializa todos os registros em memória antes de publicar. Faça as seguintes correções:
-1. appsettings.json — altere:
-json"MaxDegreeOfParallelism": 60  →  "MaxDegreeOfParallelism": 20
-2. DisponibilizarContabilizacaoWorkerHandler.cs — remova o .ToList() e o foreach separado, publicando direto no lote:
-Código atual:
-csharpvar eventoContabilizacaoList = contabilizacaoFluirList
-    .AsParallel()
-    .WithDegreeOfParallelism(10)
-    .Select(evento =>
-    {
-        var cotaDto = cotaList.TryGetValue(evento.IdCota, out var cota) ? cota : null;
-        var grupoDto = grupoList.TryGetValue(evento.IdGrupo, out var grupo) ? grupo : null;
-        return EventoContabilizacaoWrapper.Criar(evento, cotaDto, grupoDto);
-    })
-    .ToList();
+Remover o .ToList() no mapeamento de eventos no DisponibilizarContabilizacaoWorkerHandler.cs e adicionar GC.Collect() após publicar cada lote
+Publicar em chunks de 1.000 no ProcessoContabilizacaoService.cs em vez de todos de uma vez
+Adicionar MaxPollIntervalMs: 600000, SessionTimeoutMs: 60000 e MaxPollRecords: 1 na ConsumerConfiguration do appsettings.json em todos os ambientes
 
-var lote = new LoteWrapper(request.Id, request.DataBatch, request.DataProcessamento, totalRegistro);
-
-foreach (var eventoContabil in eventoContabilizacaoList)
-{
-    lote.AdicionarEventoContabilizacao(eventoContabil);
-}
-
-var resultado = await _processoContabilizacaoService.PublicarContabilizacaoAsync(lote, cancellationToken);
-Código corrigido:
-csharpvar lote = new LoteWrapper(request.Id, request.DataBatch, request.DataProcessamento, totalRegistro);
-
-foreach (var evento in contabilizacaoFluirList)
-{
-    var cotaDto = cotaList.TryGetValue(evento.IdCota, out var cota) ? cota : null;
-    var grupoDto = grupoList.TryGetValue(evento.IdGrupo, out var grupo) ? grupo : null;
-    var eventoContabil = EventoContabilizacaoWrapper.Criar(evento, cotaDto, grupoDto);
-    lote.AdicionarEventoContabilizacao(eventoContabil);
-}
-
-var resultado = await _processoContabilizacaoService.PublicarContabilizacaoAsync(lote, cancellationToken);
-3. ProcessoContabilizacaoService.cs — no método PublicarContabilizacaoAsync, publique em chunks de 1.000 em vez de todos de uma vez:
-Código atual:
-csharpawait Task.Run(() =>
-{
-    Parallel.ForEach(loteWrapper.EventosContabilizacoes, parallelOptions, item =>
-    {
-        if (item == null) return;
-        // ... monta headers, value, msg
-        var published = TryPublishWithRetry(producer, topicConfiguration.Name, msg, item.IdEvento, stoppingToken);
-        if (published) successIds.Add(item.IdEvento);
-        else failedIds.Add(item.IdEvento);
-    });
-}, stoppingToken);
-Código corrigido:
-csharpvar chunks = loteWrapper.EventosContabilizacoes
-    .Select((item, index) => new { item, index })
-    .GroupBy(x => x.index / 1000)
-    .Select(g => g.Select(x => x.item).ToList());
-
-foreach (var chunk in chunks)
-{
-    await Task.Run(() =>
-    {
-        Parallel.ForEach(chunk, parallelOptions, item =>
-        {
-            if (item == null) return;
-            // ... monta headers, value, msg (manter código existente)
-            var published = TryPublishWithRetry(producer, topicConfiguration.Name, msg, item.IdEvento, stoppingToken);
-            if (published) successIds.Add(item.IdEvento);
-            else failedIds.Add(item.IdEvento);
-        });
-    }, stoppingToken);
-}
-O objetivo é evitar materializar 10k objetos com 50+ campos em memória com 60 threads simultâneas. Com chunks de 1.000 e parallelism 20, o throughput se mantém para 400k-1M registros sem estourar memória."
+Mas sinta-se livre para identificar outros problemas relacionados a memória ou performance que encontrar no código, como outros .ToList() desnecessários, coleções que crescem sem ser liberadas, ou configurações inadequadas para o volume processado."
