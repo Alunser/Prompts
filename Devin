@@ -1,23 +1,105 @@
-No ProcessoContabilizacaoService.cs, o método TryPublishWithRetry usa producer.ProduceAsync(...).Result na linha 204, bloqueando threads de forma síncrona dentro do Parallel.ForEach. Isso causa thread pool starvation em produção.
-Fazer as seguintes alterações:
-1. Converter TryPublishWithRetry de bool para Task<bool> e trocar .Result por await:
-csharpprivate async Task<bool> TryPublishWithRetryAsync(...)
+Prompt — Correção dos 3 problemas críticos identificados no Worker Kafka
+Contexto
+Corrija os 3 problemas identificados no worker .NET Core que está travando em produção.
+NÃO reescreva o código do zero — aplique apenas as correções descritas abaixo,
+mantendo toda a estrutura, namespaces e lógica existente.
+
+Problema 1 — CRÍTICO: .Result bloqueando o Thread Pool (Deadlock por Starvation)
+Arquivo: ProcessoContabilizacaoService.cs (linhas ~48-55 e ~184-193)
+Causa: O método TryPublishWithRetry é síncrono mas é chamado dentro de um
+Parallel.ForEach com .Result no ProduceAsync. Com MaxDegreeOfParallelism
+configurado, todas as threads ficam bloqueadas esperando o Kafka responder.
+O Kafka precisa de uma thread livre para completar a entrega via TaskCompletionSource,
+mas nenhuma thread consegue avançar — deadlock.
+Correção:
+
+Transformar TryPublishWithRetry em async Task<bool> TryPublishWithRetryAsync
+Substituir .Result por await
+Substituir Parallel.ForEach por Task.WhenAll com async/await
+
+csharp// ERRADO
+private bool TryPublishWithRetry(IProducer<string, T> producer, string topic, Message<string, T> msg, ...)
 {
-    var result = await producer.ProduceAsync(topicName, message, stoppingToken);
+    var result = producer.ProduceAsync(topic, msg, stoppingToken).Result; // ← TRAVA
 }
-2. Substituir o Parallel.ForEach por Task.WhenAll com SemaphoreSlim(20):
-csharpvar semaphore = new SemaphoreSlim(20);
-var tasks = chunkList.Select(async item =>
+
+// Chamada errada:
+Parallel.ForEach(chunks, async chunk =>
 {
-    await semaphore.WaitAsync();
-    try
-    {
-        // monta headers, value, msg (manter código existente)
-        var published = await TryPublishWithRetryAsync(producer, topicConfiguration.Name, msg, item.IdEvento, stoppingToken);
-        if (published) Interlocked.Increment(ref successCount);
-        else Interlocked.Increment(ref failedCount);
-    }
-    finally { semaphore.Release(); }
+    var published = TryPublishWithRetry(...).Result; // ← TRAVA
 });
-await Task.WhenAll(tasks);
-Manter o Task.Run externo e o chunking de 1.000. Isso resolve o thread pool starvation sem perder o paralelismo.
+
+// CORRETO
+private async Task<bool> TryPublishWithRetryAsync(IProducer<string, T> producer, string topic, Message<string, T> msg, ...)
+{
+    var result = await producer.ProduceAsync(topic, msg, stoppingToken);
+}
+
+// Chamada correta:
+var tasks = chunks.Select(chunk =>
+    chunk.Select(item => TryPublishWithRetryAsync(producer, topic, BuildMessage(item), stoppingToken))
+);
+await Task.WhenAll(tasks.SelectMany(t => t));
+
+Problema 2 — ALTO: while (true) sem verificação do CancellationToken
+Arquivos: DisponibilizarContabilizacaoWorkerHandler.cs (linhas ~51-98 e ~52-64)
+Causa: O loop usa while (true) sem checar cancellationToken.IsCancellationRequested.
+Além disso, o cancellationToken não é passado para ObterPorAsync no repositório.
+No shutdown do pod (Kubernetes), o token é sinalizado, mas o worker fica preso
+numa query de banco longa sem conseguir parar — o pod é encerrado com SIGKILL.
+Correção:
+
+Substituir while (true) por while (!cancellationToken.IsCancellationRequested)
+Adicionar cancellationToken.ThrowIfCancellationRequested() no início do loop
+Passar cancellationToken para todas as chamadas de repositório/banco
+
+csharp// ERRADO
+while (true)
+{
+    var dados = await repository.ObterPorAsync(filtro); // sem token
+}
+
+// CORRETO
+while (!cancellationToken.IsCancellationRequested)
+{
+    cancellationToken.ThrowIfCancellationRequested();
+    var dados = await repository.ObterPorAsync(filtro, cancellationToken); // com token
+}
+
+Resumo das mudanças
+#ProblemaSeveridadeArquivoFix1.Result em ProduceAsync dentro de Parallel.ForEach🔴 CríticoProcessoContabilizacaoService.csasync/await + Task.WhenAll2while (true) sem checar CancellationToken🟠 AltoDisponibilizarContabilizacaoWorkerHandler.cswhile (!token.IsCancellationRequested) + passar token pro banco
+
+Logs — Adicionar LogInformation em cada ponto do fluxo
+Adicione _logger.LogInformation nos pontos abaixo para rastrear exatamente onde o worker para em produção.
+Mantenha os LogWarning e LogCritical existentes — apenas adicione os novos LogInformation.
+ContabilizacoesNewconWorker.cs
+csharp_logger.LogInformation("Worker iniciando ciclo de consumo.");
+_logger.LogInformation("Mensagem consumida do Kafka. Offset: {Offset}", mensagem.Offset);
+_logger.LogInformation("Mensagem processável. Enviando para o Mediator.");
+_logger.LogInformation("Mediator concluído. Tentando commit do offset.");
+_logger.LogInformation("Offset commitado com sucesso.");
+_logger.LogInformation("Nenhuma mensagem disponível. Aguardando próximo ciclo.");
+ProcessoContabilizacaoService.cs
+csharp_logger.LogInformation("Iniciando publicação. Total de eventos: {Total}", eventos.Count);
+_logger.LogInformation("Dividindo em chunks. Total de chunks: {Chunks}", chunks.Count());
+_logger.LogInformation("Iniciando publicação do chunk {Index}. Tamanho: {Size}", index, chunk.Count);
+_logger.LogInformation("Aguardando semáforo para chunk {Index}.", index);
+_logger.LogInformation("Semáforo adquirido. Publicando chunk {Index}.", index);
+_logger.LogInformation("Chunk {Index} publicado. Sucesso: {Success} | Falha: {Failed}", index, successCount, failedCount);
+_logger.LogInformation("Publicação concluída. Total sucesso: {Success} | Total falha: {Failed}", totalSuccess, totalFailed);
+TryPublishWithRetryAsync
+csharp_logger.LogInformation("Tentativa {Attempt}/{Max} de publicar evento {IdEvento} no tópico {Topic}.", attempt, maxRetries, idEvento, topicName);
+_logger.LogInformation("Evento {IdEvento} publicado com sucesso na tentativa {Attempt}.", idEvento, attempt);
+Repositório (ContabilizacaoFluirRepository.cs)
+csharp_logger.LogInformation("Iniciando query no banco. DataBatch: {DataBatch}", dataBatch);
+_logger.LogInformation("Query concluída. Registros retornados: {Count}", registros.Count());
+
+O que NÃO mudar
+
+Nomes de classes, namespaces e arquivos
+Lógica de negócio existente
+Headers Kafka
+Estrutura de logs
+Configurações do appsettings.json
+Autenticação via certificado KaaS
+Uso do Mediator e estrutura dos comandos
