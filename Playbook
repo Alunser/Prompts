@@ -1,0 +1,51 @@
+## Overview
+
+Implementar o padrão de log estruturado para o Datadog em todas as classes do projeto `UA2.Consorcio.Worker`. O objetivo é garantir rastreabilidade completa de um lote entre diferentes serviços usando o `IdLote` como chave principal no Datadog Log Explorer.
+
+## Procedure
+
+1. **Instalar pacotes**: Adicionar os pacotes abaixo ao projeto `UA2.Consorcio.Worker`:
+   - `Serilog.AspNetCore`
+   - `Serilog.Sinks.Datadog.Logs`
+   - `Serilog.Enrichers.Environment`
+   - `Serilog.Enrichers.Thread`
+
+2. **Criar o `LoteLogContext.cs`**: Criar o arquivo em `4.Infra/UA2.Consorcio.Infra/Logging/LoteLogContext.cs` usando o arquivo de referência fornecido. Essa classe injeta automaticamente os campos `IdLote`, `DataBatch`, `DataProcessamento`, `Origem` e `TotalRegistros` em todos os logs do bloco `using` via `LogContext.PushProperty` do Serilog — sem precisar repetir em cada chamada de log.
+
+3. **Substituir o `Program.cs`**: Usar o arquivo de referência fornecido. O ponto crítico é o `.Enrich.FromLogContext()` que é obrigatório para o `LoteLogContext` funcionar, e o `.UseSerilog()` no `CreateHostBuilder` que substitui o `ILogger` padrão do .NET pelo Serilog. A `DD_API_KEY` deve vir de variável de ambiente — nunca hardcoded.
+
+4. **Substituir `IAppLogger<T>` por `ILogger<T>`**: Em todas as classes que hoje injetam `IAppLogger<T>`, substituir por `ILogger<T>` do namespace `Microsoft.Extensions.Logging`. Remover também o registro do `IAppLogger` no `Startup.cs` — o `ILogger<T>` já é registrado automaticamente pelo Serilog via `.UseSerilog()`.
+
+5. **Remover todos os logs antigos**: Remover TODOS os usos de `_logger.Info(...)`, `_logger.Warning(...)`, `_logger.Error(...)`, `_logger.Critical(...)`, `_logger.ProcessStart(...)` e `_logger.ProcessEnd(...)` e substituir pelos equivalentes do `ILogger<T>`: `LogInformation`, `LogWarning`, `LogError`, `LogCritical`.
+
+6. **Adicionar o `LoteLogContext` nos fluxos de lote**: Abrir um `LoteLogContext` no início de cada método que processa um lote, conforme a tabela abaixo:
+
+   | Classe | Origem |
+   |---|---|
+   | `ContabilizacoesController` | `"API"` |
+   | Handlers chamados via controller | `"API"` |
+   | `ContabilizacoesNewconWorker` e seus Handlers | `"WORKER"` |
+   | Funções Lambda (Python) | `"LAMBDA"` |
+
+   Quando o processamento for disparado via `Task.Run`, reabrir o `LoteLogContext` dentro da Task — o `LogContext` do Serilog é `AsyncLocal` e não propaga automaticamente para novas Tasks.
+
+7. **Seguir o catálogo de eventos**: O campo `Evento` deve usar APENAS os valores abaixo. A mensagem sempre inicia com o valor do Evento no formato: `"EVENTO | Fluxo=NomeDoFluxo | Campo={Campo}"`.
+
+   | Evento | Nível |
+   |---|---|
+   | `LOTE_INICIADO` | Information |
+   | `CONSULTA_REALIZADA` | Information |
+   | `KAFKA_PUBLICADO` | Information |
+   | `LOTE_CONCLUIDO` | Information |
+   | `WORKER_INICIADO` | Information |
+   | `WORKER_AGUARDANDO` | Information |
+   | `RETRY_TENTATIVA` | Warning |
+   | `RECONEXAO_KAFKA` | Warning |
+   | `FALHA_PARCIAL` | Error |
+   | `FALHA_SERIALIZACAO` | Error |
+   | `FALHA_DEPENDENCIA` | Error |
+   | `LOTE_ABORTADO` | Critical |
+
+8. **Não alterar**: Lógica de negócio, repositórios, services, configurações do Kafka, Commands, CommandResults e DTOs. Nos testes unitários, apenas atualizar mocks de `IAppLogger` para `ILogger<T>`.
+
+9. **Antes de prosseguir com a implementação e ajustes, sempre gere um arquivo para que eu possa revisar as alterações propostas. Só após eu dar o ok, pode seguir com a implementação.**
