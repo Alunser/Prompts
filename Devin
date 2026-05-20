@@ -1,105 +1,96 @@
-Prompt — Correção dos 3 problemas críticos identificados no Worker Kafka
+Tarefa — Implementação do Padrão de Log Estruturado (Datadog)
 Contexto
-Corrija os 3 problemas identificados no worker .NET Core que está travando em produção.
-NÃO reescreva o código do zero — aplique apenas as correções descritas abaixo,
-mantendo toda a estrutura, namespaces e lógica existente.
+O squad definiu um padrão de log estruturado para todas as aplicações do fluxo
+de contabilizações. O objetivo é garantir rastreabilidade completa de um lote
+entre diferentes serviços no Datadog Log Explorer usando o IdLote como chave
+principal entre todas as aplicações.
+Os arquivos de referência estão anexados a esta tarefa:
 
-Problema 1 — CRÍTICO: .Result bloqueando o Thread Pool (Deadlock por Starvation)
-Arquivo: ProcessoContabilizacaoService.cs (linhas ~48-55 e ~184-193)
-Causa: O método TryPublishWithRetry é síncrono mas é chamado dentro de um
-Parallel.ForEach com .Result no ProduceAsync. Com MaxDegreeOfParallelism
-configurado, todas as threads ficam bloqueadas esperando o Kafka responder.
-O Kafka precisa de uma thread livre para completar a entrega via TaskCompletionSource,
-mas nenhuma thread consegue avançar — deadlock.
-Correção:
+playbook-log-datadog.docx — padrão completo com regras, exemplos e queries
+LoteLogContext.cs — classe nova a ser criada no projeto Infra
+Program.cs — configuração do Serilog com sink do Datadog
 
-Transformar TryPublishWithRetry em async Task<bool> TryPublishWithRetryAsync
-Substituir .Result por await
-Substituir Parallel.ForEach por Task.WhenAll com async/await
 
-csharp// ERRADO
-private bool TryPublishWithRetry(IProducer<string, T> producer, string topic, Message<string, T> msg, ...)
-{
-    var result = producer.ProduceAsync(topic, msg, stoppingToken).Result; // ← TRAVA
-}
+O que fazer
+Passo 1 — Instalar pacotes no projeto UA2.Consorcio.Worker
+bashdotnet add package Serilog.AspNetCore
+dotnet add package Serilog.Sinks.Datadog.Logs
+dotnet add package Serilog.Enrichers.Environment
+dotnet add package Serilog.Enrichers.Thread
 
-// Chamada errada:
-Parallel.ForEach(chunks, async chunk =>
-{
-    var published = TryPublishWithRetry(...).Result; // ← TRAVA
-});
+Passo 2 — Criar o LoteLogContext.cs
+Caminho: 4.Infra/UA2.Consorcio.Infra/Logging/LoteLogContext.cs
+Usar exatamente o arquivo LoteLogContext.cs fornecido.
 
-// CORRETO
-private async Task<bool> TryPublishWithRetryAsync(IProducer<string, T> producer, string topic, Message<string, T> msg, ...)
-{
-    var result = await producer.ProduceAsync(topic, msg, stoppingToken);
-}
+Passo 3 — Substituir o Program.cs
+Usar exatamente o arquivo Program.cs fornecido.
 
-// Chamada correta:
-var tasks = chunks.Select(chunk =>
-    chunk.Select(item => TryPublishWithRetryAsync(producer, topic, BuildMessage(item), stoppingToken))
-);
-await Task.WhenAll(tasks.SelectMany(t => t));
+Passo 4 — Substituir IAppLogger<T> por ILogger<T> em todo o projeto
+Em todas as classes que hoje injetam IAppLogger<T>, substituir por
+ILogger<T> do namespace Microsoft.Extensions.Logging.
+Remover também o registro do IAppLogger no Startup.cs — o ILogger<T>
+já é registrado automaticamente pelo Serilog via .UseSerilog().
 
-Problema 2 — ALTO: while (true) sem verificação do CancellationToken
-Arquivos: DisponibilizarContabilizacaoWorkerHandler.cs (linhas ~51-98 e ~52-64)
-Causa: O loop usa while (true) sem checar cancellationToken.IsCancellationRequested.
-Além disso, o cancellationToken não é passado para ObterPorAsync no repositório.
-No shutdown do pod (Kubernetes), o token é sinalizado, mas o worker fica preso
-numa query de banco longa sem conseguir parar — o pod é encerrado com SIGKILL.
-Correção:
+Passo 5 — Reescrever os logs seguindo o padrão abaixo
+Campos obrigatórios em todo log de lote
+Abrir um LoteLogContext no início de cada fluxo que processa um lote.
+Ele injeta automaticamente os campos abaixo em todos os logs do bloco using:
+CampoValorIdLoteGuid do lote — chave principalDataBatchData/hora de geração do lote na origemDataProcessamentoData/hora do processamento nesta aplicaçãoOrigem"API" ou "WORKER"TotalRegistrosTotal de registros do lote
+csharpusing var logCtx = new LoteLogContext(
+    idLote:         loteId,
+    dataBatch:      dataBatch,
+    origem:         "WORKER", // ou "API"
+    totalRegistros: totalRegistros);
 
-Substituir while (true) por while (!cancellationToken.IsCancellationRequested)
-Adicionar cancellationToken.ThrowIfCancellationRequested() no início do loop
-Passar cancellationToken para todas as chamadas de repositório/banco
+Atenção: quando o processamento for disparado via Task.Run, reabrir
+o LoteLogContext dentro da Task — o LogContext do Serilog é AsyncLocal
+e não propaga automaticamente para novas Tasks.
 
-csharp// ERRADO
-while (true)
-{
-    var dados = await repository.ObterPorAsync(filtro); // sem token
-}
+Origem por ponto de entrada
+ClasseOrigemContabilizacoesController"API"Qualquer Handler chamado via controller"API"ContabilizacoesNewconWorker e seus Handlers"WORKER"
+Catálogo de Eventos — usar APENAS estes valores no campo Evento
+EventoNívelLOTE_INICIADOInformationCONSULTA_REALIZADAInformationKAFKA_PUBLICADOInformationLOTE_CONCLUIDOInformationWORKER_INICIADOInformationWORKER_AGUARDANDOInformationRETRY_TENTATIVAWarningRECONEXAO_KAFKAWarningFALHA_PARCIALErrorFALHA_SERIALIZACAOErrorFALHA_DEPENDENCIAErrorLOTE_ABORTADOCritical
+Formato obrigatório da mensagem
+"EVENTO | Fluxo=NomeDoFluxo | Campo1={Campo1} | Campo2={Campo2}"
+A mensagem sempre inicia com o valor do Evento.
+Exemplos
+csharp// ✅ CORRETO
+_logger.LogInformation(
+    "LOTE_INICIADO | Fluxo=Handle | TotalRegistros={TotalRegistros}",
+    totalRegistros);
 
-// CORRETO
-while (!cancellationToken.IsCancellationRequested)
-{
-    cancellationToken.ThrowIfCancellationRequested();
-    var dados = await repository.ObterPorAsync(filtro, cancellationToken); // com token
-}
+_logger.LogWarning(
+    "RETRY_TENTATIVA | Fluxo=PublicacaoKafka | Tentativa={Tentativa}",
+    tentativa);
 
-Resumo das mudanças
-#ProblemaSeveridadeArquivoFix1.Result em ProduceAsync dentro de Parallel.ForEach🔴 CríticoProcessoContabilizacaoService.csasync/await + Task.WhenAll2while (true) sem checar CancellationToken🟠 AltoDisponibilizarContabilizacaoWorkerHandler.cswhile (!token.IsCancellationRequested) + passar token pro banco
+_logger.LogError(ex,
+    "FALHA_SERIALIZACAO | Fluxo=AvroSerializer | AccountId={AccountId}",
+    accountId);
 
-Logs — Adicionar LogInformation em cada ponto do fluxo
-Adicione _logger.LogInformation nos pontos abaixo para rastrear exatamente onde o worker para em produção.
-Mantenha os LogWarning e LogCritical existentes — apenas adicione os novos LogInformation.
-ContabilizacoesNewconWorker.cs
-csharp_logger.LogInformation("Worker iniciando ciclo de consumo.");
-_logger.LogInformation("Mensagem consumida do Kafka. Offset: {Offset}", mensagem.Offset);
-_logger.LogInformation("Mensagem processável. Enviando para o Mediator.");
-_logger.LogInformation("Mediator concluído. Tentando commit do offset.");
-_logger.LogInformation("Offset commitado com sucesso.");
-_logger.LogInformation("Nenhuma mensagem disponível. Aguardando próximo ciclo.");
-ProcessoContabilizacaoService.cs
-csharp_logger.LogInformation("Iniciando publicação. Total de eventos: {Total}", eventos.Count);
-_logger.LogInformation("Dividindo em chunks. Total de chunks: {Chunks}", chunks.Count());
-_logger.LogInformation("Iniciando publicação do chunk {Index}. Tamanho: {Size}", index, chunk.Count);
-_logger.LogInformation("Aguardando semáforo para chunk {Index}.", index);
-_logger.LogInformation("Semáforo adquirido. Publicando chunk {Index}.", index);
-_logger.LogInformation("Chunk {Index} publicado. Sucesso: {Success} | Falha: {Failed}", index, successCount, failedCount);
-_logger.LogInformation("Publicação concluída. Total sucesso: {Success} | Total falha: {Failed}", totalSuccess, totalFailed);
-TryPublishWithRetryAsync
-csharp_logger.LogInformation("Tentativa {Attempt}/{Max} de publicar evento {IdEvento} no tópico {Topic}.", attempt, maxRetries, idEvento, topicName);
-_logger.LogInformation("Evento {IdEvento} publicado com sucesso na tentativa {Attempt}.", idEvento, attempt);
-Repositório (ContabilizacaoFluirRepository.cs)
-csharp_logger.LogInformation("Iniciando query no banco. DataBatch: {DataBatch}", dataBatch);
-_logger.LogInformation("Query concluída. Registros retornados: {Count}", registros.Count());
+_logger.LogCritical(
+    "LOTE_ABORTADO | Fluxo=Handle | TotalRegistros={Total} | Sucesso={Sucesso} | Falha={Falha}",
+    total, sucesso, falha);
 
-O que NÃO mudar
+// ❌ ERRADO — não usar
+_logger.Info("Total de registros: {0}", totalRegistros);
+_logger.ProcessStart("Handle", new { ... });
+_logger.Warning("Validacao falhou: {0}", erros);
 
-Nomes de classes, namespaces e arquivos
-Lógica de negócio existente
-Headers Kafka
-Estrutura de logs
-Configurações do appsettings.json
-Autenticação via certificado KaaS
-Uso do Mediator e estrutura dos comandos
+O que NÃO alterar
+
+Lógica de negócio (repositórios, services, processamento)
+Configurações do Kafka, Schema Registry, Consumer/Producer
+Estrutura dos Commands, CommandResults e DTOs
+Testes unitários — apenas atualizar mocks de IAppLogger para ILogger<T>
+
+
+Critérios de aceite
+
+ Nenhum uso de IAppLogger restante no código de produção
+ Nenhum uso de _logger.Info, _logger.Warning, _logger.Error, _logger.Critical, _logger.ProcessStart, _logger.ProcessEnd
+ Todo log dentro de fluxo de lote está dentro de um bloco using var logCtx = new LoteLogContext(...)
+ O campo Evento usa apenas os valores do catálogo acima
+ A mensagem sempre inicia com o valor do Evento
+ LoteLogContext é reaberto dentro de Task.Run quando necessário
+ DD_API_KEY vem de variável de ambiente — nunca hardcoded
+ Build sem erros
