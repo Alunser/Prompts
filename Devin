@@ -1,160 +1,41 @@
 Overview
-A
-B
-Implementar o padrão de log estruturado para o Datadog em todas as classes do projeto UA2.Consorcio.Worker. O objetivo é garantir rastreabilidade completa de um lote entre diferentes serviços usando o IdLote como chave principal no Datadog Log Explorer. A classe IAppLogger deve ser completamente removida do projeto e substituída pelo padrão abaixo.
+Ajustar o mapeamento de níveis de log para o Datadog no projeto UA2.Consorcio.Worker. Os logs estão aparecendo todos na mesma cor no Datadog Log Explorer pois o campo status não está sendo gerado corretamente.
 Procedure
 
-Instalar pacotes: Adicionar os pacotes abaixo ao projeto UA2.Consorcio.Worker:
+Criar o DatadogLevelEnricher.cs: Criar em 4.Infra/UA2.Consorcio.Infra/Logging/DatadogLevelEnricher.cs. Essa classe mapeia o nível do Serilog para o campo status nativo do Datadog, responsável pela coloração dos logs no Log Explorer.
 
-Serilog.AspNetCore
-Serilog.Sinks.Datadog.Logs
-Serilog.Enrichers.Environment
-Serilog.Enrichers.Thread
-
-
-Remover o IAppLogger: Remover completamente a interface IAppLogger<T>, sua implementação AppLogger<T> e o registro no Startup.cs. Substituir todas as injeções de IAppLogger<T> por ILogger<T> do namespace Microsoft.Extensions.Logging. O ILogger<T> já é registrado automaticamente pelo Serilog.
-Substituir o Program.cs: Reescrever o Program.cs conforme o exemplo abaixo. O .Enrich.FromLogContext() é obrigatório para o LogLoteContext funcionar. A DD_API_KEY deve vir de variável de ambiente — nunca hardcoded.
-
-csharp// Program.cs — UA2.Consorcio.Worker
-using Serilog;
+csharp// DatadogLevelEnricher.cs — UA2.Consorcio.Infra.Logging
+using Serilog.Core;
 using Serilog.Events;
-
-namespace UA2.Consorcio.Worker
-{
-    [ExcludeFromCodeCoverage]
-    public class Program
-    {
-        public static async Task Main(string[] args)
-        {
-            Log.Logger = new LoggerConfiguration()
-                .MinimumLevel.Information()
-                .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
-                .MinimumLevel.Override("Microsoft.Hosting.Lifetime", LogEventLevel.Warning)
-                .MinimumLevel.Override("System", LogEventLevel.Warning)
-                .MinimumLevel.Override("UA2.Consorcio", LogEventLevel.Information)
-                .Enrich.FromLogContext()
-                .Enrich.WithMachineName()
-                .Enrich.WithThreadId()
-                .WriteTo.Console(
-                    outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} {Properties}{NewLine}{Exception}"
-                )
-                .WriteTo.DatadogLogs(
-                    apiKey: Environment.GetEnvironmentVariable("DD_API_KEY") ?? string.Empty,
-                    service: "ua2-acl-contabilizacoes-newcon",
-                    source: "csharp",
-                    host: Environment.MachineName,
-                    tags: new[]
-                    {
-                        "env:" + (Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "development"),
-                        "squad:S003619",
-                        "diretoria:DIR-CIO",
-                        "community:C0046"
-                    }
-                )
-                .CreateLogger();
-
-            try
-            {
-                await CreateHostBuilder(args).Build().RunAsync();
-            }
-            catch (Exception ex)
-            {
-                Log.Fatal(ex, "WORKER_FALHA_CRITICA | Host encerrado inesperadamente");
-            }
-            finally
-            {
-                await Log.CloseAndFlushAsync();
-            }
-        }
-
-        public static IHostBuilder CreateHostBuilder(string[] args) =>
-            Host.CreateDefaultBuilder(args)
-                .UseSerilog()
-                .ConfigureWebHostDefaults(webBuilder =>
-                {
-                    webBuilder.UseStartup<Startup>();
-                });
-    }
-}
-
-Criar o LogLoteContext.cs: Criar em 4.Infra/UA2.Consorcio.Infra/Logging/LogLoteContext.cs. Essa classe injeta automaticamente os campos do padrão em todos os logs emitidos dentro do bloco using — sem precisar repetir em cada chamada.
-
-csharp// LogLoteContext.cs — UA2.Consorcio.Infra.Logging
-using Serilog.Context;
 
 namespace UA2.Consorcio.Infra.Logging
 {
-    public sealed class LogLoteContext : IDisposable
+    public class DatadogLevelEnricher : ILogEventEnricher
     {
-        private readonly IDisposable _idLote;
-        private readonly IDisposable _dataBatch;
-        private readonly IDisposable _dataProcessamento;
-        private readonly IDisposable _origem;
-        private readonly IDisposable _totalRegistros;
-
-        public LogLoteContext(
-            Guid idLote,
-            DateTime dataBatch,
-            string origem,
-            int totalRegistros = 0)
+        public void Enrich(LogEvent logEvent, ILogEventPropertyFactory propertyFactory)
         {
-            _totalRegistros    = LogContext.PushProperty("TotalRegistros",    totalRegistros);
-            _origem            = LogContext.PushProperty("Origem",            origem);
-            _dataProcessamento = LogContext.PushProperty("DataProcessamento", DateTime.UtcNow.ToString("o"));
-            _dataBatch         = LogContext.PushProperty("DataBatch",         dataBatch.ToString("o"));
-            _idLote            = LogContext.PushProperty("IdLote",            idLote.ToString());
-        }
+            var status = logEvent.Level switch
+            {
+                LogEventLevel.Verbose     => "trace",
+                LogEventLevel.Debug       => "debug",
+                LogEventLevel.Information => "info",
+                LogEventLevel.Warning     => "warn",
+                LogEventLevel.Error       => "error",
+                LogEventLevel.Fatal       => "critical",
+                _                         => "info"
+            };
 
-        public void Dispose()
-        {
-            _totalRegistros.Dispose();
-            _origem.Dispose();
-            _dataProcessamento.Dispose();
-            _dataBatch.Dispose();
-            _idLote.Dispose();
+            logEvent.AddPropertyIfAbsent(
+                propertyFactory.CreateProperty("status", status));
         }
     }
 }
 
-Abrir o LogLoteContext nos fluxos de lote: No início de cada método que processa um lote, abrir o contexto conforme a origem. Quando o processamento for disparado via Task.Run, reabrir o LogLoteContext dentro da Task pois o LogContext do Serilog é AsyncLocal e não propaga automaticamente.
+Registrar o enricher no Program.cs: Adicionar o .Enrich.With<DatadogLevelEnricher>() na configuração do Serilog, junto aos outros enrichers já existentes.
 
-csharp// Exemplo de uso no Handler
-using var logCtx = new LogLoteContext(
-    idLote:         loteId,
-    dataBatch:      dataBatch,
-    origem:         "WORKER", // "API", "WORKER" ou "LAMBDA"
-    totalRegistros: totalRegistros);
+csharp.Enrich.FromLogContext()
+.Enrich.WithMachineName()
+.Enrich.WithThreadId()
+.Enrich.With<DatadogLevelEnricher>() // ← adicionar esta linha
 
-// Todos os logs abaixo já saem com IdLote, DataBatch,
-// DataProcessamento, Origem e TotalRegistros no Datadog
-_logger.LogInformation(
-    "LOTE_INICIADO | Fluxo=Handle | TotalRegistros={TotalRegistros}",
-    totalRegistros);
-ClasseOrigemContabilizacoesController"API"Handlers chamados via controller"API"ContabilizacoesNewconWorker e seus Handlers"WORKER"Funções Lambda (Python)"LAMBDA"
-
-Remover todos os logs antigos e seguir o padrão: Remover TODOS os usos de _logger.Info(...), _logger.Warning(...), _logger.Error(...), _logger.Critical(...), _logger.ProcessStart(...) e _logger.ProcessEnd(...). Substituir seguindo o catálogo abaixo. A mensagem sempre inicia com o valor do Evento no formato "EVENTO | Fluxo=NomeDoFluxo | Campo={Campo}".
-
-csharp// ✅ CORRETO
-_logger.LogInformation(
-    "LOTE_INICIADO | Fluxo=Handle | TotalRegistros={TotalRegistros}",
-    totalRegistros);
-
-_logger.LogWarning(
-    "RETRY_TENTATIVA | Fluxo=PublicacaoKafka | Tentativa={Tentativa}",
-    tentativa);
-
-_logger.LogError(ex,
-    "FALHA_SERIALIZACAO | Fluxo=AvroSerializer | AccountId={AccountId}",
-    accountId);
-
-_logger.LogCritical(
-    "LOTE_ABORTADO | Fluxo=Handle | TotalRegistros={Total} | Sucesso={Sucesso} | Falha={Falha}",
-    total, sucesso, falha);
-
-// ❌ ERRADO — não usar
-_logger.Info("Total de registros: {0}", totalRegistros);
-_logger.ProcessStart("Handle", new { ... });
-EventoNívelLOTE_INICIADOInformationCONSULTA_REALIZADAInformationKAFKA_PUBLICADOInformationLOTE_CONCLUIDOInformationWORKER_INICIADOInformationWORKER_AGUARDANDOInformationRETRY_TENTATIVAWarningRECONEXAO_KAFKAWarningFALHA_PARCIALErrorFALHA_SERIALIZACAOErrorFALHA_DEPENDENCIAErrorLOTE_ABORTADOCritical
-
-Não alterar: Lógica de negócio, repositórios, services, configurações do Kafka, Commands, CommandResults e DTOs. Nos testes unitários, apenas atualizar mocks de IAppLogger para ILogger<T>.
 Antes de prosseguir com a implementação e ajustes, sempre gere um arquivo para que eu possa revisar as alterações propostas. Só após eu dar o ok, pode seguir com a implementação.
