@@ -1,59 +1,139 @@
-Tarefa — Implementação do Padrão de Log Estruturado (Datadog)
-Contexto
-O squad definiu um padrão de log estruturado para todas as aplicações do fluxo
-de contabilizações. O objetivo é garantir rastreabilidade completa de um lote
-entre diferentes serviços no Datadog Log Explorer usando o IdLote como chave
-principal entre todas as aplicações.
-Os arquivos de referência estão anexados a esta tarefa:
+Overview
+A
+B
+Implementar o padrão de log estruturado para o Datadog em todas as classes do projeto UA2.Consorcio.Worker. O objetivo é garantir rastreabilidade completa de um lote entre diferentes serviços usando o IdLote como chave principal no Datadog Log Explorer. A classe IAppLogger deve ser completamente removida do projeto e substituída pelo padrão abaixo.
+Procedure
 
-playbook-log-datadog.docx — padrão completo com regras, exemplos e queries
-LoteLogContext.cs — classe nova a ser criada no projeto Infra
-Program.cs — configuração do Serilog com sink do Datadog
+Instalar pacotes: Adicionar os pacotes abaixo ao projeto UA2.Consorcio.Worker:
+
+Serilog.AspNetCore
+Serilog.Sinks.Datadog.Logs
+Serilog.Enrichers.Environment
+Serilog.Enrichers.Thread
 
 
-O que fazer
-Passo 1 — Instalar pacotes no projeto UA2.Consorcio.Worker
-bashdotnet add package Serilog.AspNetCore
-dotnet add package Serilog.Sinks.Datadog.Logs
-dotnet add package Serilog.Enrichers.Environment
-dotnet add package Serilog.Enrichers.Thread
+Remover o IAppLogger: Remover completamente a interface IAppLogger<T>, sua implementação AppLogger<T> e o registro no Startup.cs. Substituir todas as injeções de IAppLogger<T> por ILogger<T> do namespace Microsoft.Extensions.Logging. O ILogger<T> já é registrado automaticamente pelo Serilog.
+Substituir o Program.cs: Reescrever o Program.cs conforme o exemplo abaixo. O .Enrich.FromLogContext() é obrigatório para o LogLoteContext funcionar. A DD_API_KEY deve vir de variável de ambiente — nunca hardcoded.
 
-Passo 2 — Criar o LoteLogContext.cs
-Caminho: 4.Infra/UA2.Consorcio.Infra/Logging/LoteLogContext.cs
-Usar exatamente o arquivo LoteLogContext.cs fornecido.
+csharp// Program.cs — UA2.Consorcio.Worker
+using Serilog;
+using Serilog.Events;
 
-Passo 3 — Substituir o Program.cs
-Usar exatamente o arquivo Program.cs fornecido.
+namespace UA2.Consorcio.Worker
+{
+    [ExcludeFromCodeCoverage]
+    public class Program
+    {
+        public static async Task Main(string[] args)
+        {
+            Log.Logger = new LoggerConfiguration()
+                .MinimumLevel.Information()
+                .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
+                .MinimumLevel.Override("Microsoft.Hosting.Lifetime", LogEventLevel.Warning)
+                .MinimumLevel.Override("System", LogEventLevel.Warning)
+                .MinimumLevel.Override("UA2.Consorcio", LogEventLevel.Information)
+                .Enrich.FromLogContext()
+                .Enrich.WithMachineName()
+                .Enrich.WithThreadId()
+                .WriteTo.Console(
+                    outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} {Properties}{NewLine}{Exception}"
+                )
+                .WriteTo.DatadogLogs(
+                    apiKey: Environment.GetEnvironmentVariable("DD_API_KEY") ?? string.Empty,
+                    service: "ua2-acl-contabilizacoes-newcon",
+                    source: "csharp",
+                    host: Environment.MachineName,
+                    tags: new[]
+                    {
+                        "env:" + (Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "development"),
+                        "squad:S003619",
+                        "diretoria:DIR-CIO",
+                        "community:C0046"
+                    }
+                )
+                .CreateLogger();
 
-Passo 4 — Substituir IAppLogger<T> por ILogger<T> em todo o projeto
-Em todas as classes que hoje injetam IAppLogger<T>, substituir por
-ILogger<T> do namespace Microsoft.Extensions.Logging.
-Remover também o registro do IAppLogger no Startup.cs — o ILogger<T>
-já é registrado automaticamente pelo Serilog via .UseSerilog().
+            try
+            {
+                await CreateHostBuilder(args).Build().RunAsync();
+            }
+            catch (Exception ex)
+            {
+                Log.Fatal(ex, "WORKER_FALHA_CRITICA | Host encerrado inesperadamente");
+            }
+            finally
+            {
+                await Log.CloseAndFlushAsync();
+            }
+        }
 
-Passo 5 — Reescrever os logs seguindo o padrão abaixo
-Campos obrigatórios em todo log de lote
-Abrir um LoteLogContext no início de cada fluxo que processa um lote.
-Ele injeta automaticamente os campos abaixo em todos os logs do bloco using:
-CampoValorIdLoteGuid do lote — chave principalDataBatchData/hora de geração do lote na origemDataProcessamentoData/hora do processamento nesta aplicaçãoOrigem"API" ou "WORKER"TotalRegistrosTotal de registros do lote
-csharpusing var logCtx = new LoteLogContext(
+        public static IHostBuilder CreateHostBuilder(string[] args) =>
+            Host.CreateDefaultBuilder(args)
+                .UseSerilog()
+                .ConfigureWebHostDefaults(webBuilder =>
+                {
+                    webBuilder.UseStartup<Startup>();
+                });
+    }
+}
+
+Criar o LogLoteContext.cs: Criar em 4.Infra/UA2.Consorcio.Infra/Logging/LogLoteContext.cs. Essa classe injeta automaticamente os campos do padrão em todos os logs emitidos dentro do bloco using — sem precisar repetir em cada chamada.
+
+csharp// LogLoteContext.cs — UA2.Consorcio.Infra.Logging
+using Serilog.Context;
+
+namespace UA2.Consorcio.Infra.Logging
+{
+    public sealed class LogLoteContext : IDisposable
+    {
+        private readonly IDisposable _idLote;
+        private readonly IDisposable _dataBatch;
+        private readonly IDisposable _dataProcessamento;
+        private readonly IDisposable _origem;
+        private readonly IDisposable _totalRegistros;
+
+        public LogLoteContext(
+            Guid idLote,
+            DateTime dataBatch,
+            string origem,
+            int totalRegistros = 0)
+        {
+            _totalRegistros    = LogContext.PushProperty("TotalRegistros",    totalRegistros);
+            _origem            = LogContext.PushProperty("Origem",            origem);
+            _dataProcessamento = LogContext.PushProperty("DataProcessamento", DateTime.UtcNow.ToString("o"));
+            _dataBatch         = LogContext.PushProperty("DataBatch",         dataBatch.ToString("o"));
+            _idLote            = LogContext.PushProperty("IdLote",            idLote.ToString());
+        }
+
+        public void Dispose()
+        {
+            _totalRegistros.Dispose();
+            _origem.Dispose();
+            _dataProcessamento.Dispose();
+            _dataBatch.Dispose();
+            _idLote.Dispose();
+        }
+    }
+}
+
+Abrir o LogLoteContext nos fluxos de lote: No início de cada método que processa um lote, abrir o contexto conforme a origem. Quando o processamento for disparado via Task.Run, reabrir o LogLoteContext dentro da Task pois o LogContext do Serilog é AsyncLocal e não propaga automaticamente.
+
+csharp// Exemplo de uso no Handler
+using var logCtx = new LogLoteContext(
     idLote:         loteId,
     dataBatch:      dataBatch,
-    origem:         "WORKER", // ou "API"
+    origem:         "WORKER", // "API", "WORKER" ou "LAMBDA"
     totalRegistros: totalRegistros);
 
-Atenção: quando o processamento for disparado via Task.Run, reabrir
-o LoteLogContext dentro da Task — o LogContext do Serilog é AsyncLocal
-e não propaga automaticamente para novas Tasks.
+// Todos os logs abaixo já saem com IdLote, DataBatch,
+// DataProcessamento, Origem e TotalRegistros no Datadog
+_logger.LogInformation(
+    "LOTE_INICIADO | Fluxo=Handle | TotalRegistros={TotalRegistros}",
+    totalRegistros);
+ClasseOrigemContabilizacoesController"API"Handlers chamados via controller"API"ContabilizacoesNewconWorker e seus Handlers"WORKER"Funções Lambda (Python)"LAMBDA"
 
-Origem por ponto de entrada
-ClasseOrigemContabilizacoesController"API"Qualquer Handler chamado via controller"API"ContabilizacoesNewconWorker e seus Handlers"WORKER"
-Catálogo de Eventos — usar APENAS estes valores no campo Evento
-EventoNívelLOTE_INICIADOInformationCONSULTA_REALIZADAInformationKAFKA_PUBLICADOInformationLOTE_CONCLUIDOInformationWORKER_INICIADOInformationWORKER_AGUARDANDOInformationRETRY_TENTATIVAWarningRECONEXAO_KAFKAWarningFALHA_PARCIALErrorFALHA_SERIALIZACAOErrorFALHA_DEPENDENCIAErrorLOTE_ABORTADOCritical
-Formato obrigatório da mensagem
-"EVENTO | Fluxo=NomeDoFluxo | Campo1={Campo1} | Campo2={Campo2}"
-A mensagem sempre inicia com o valor do Evento.
-Exemplos
+Remover todos os logs antigos e seguir o padrão: Remover TODOS os usos de _logger.Info(...), _logger.Warning(...), _logger.Error(...), _logger.Critical(...), _logger.ProcessStart(...) e _logger.ProcessEnd(...). Substituir seguindo o catálogo abaixo. A mensagem sempre inicia com o valor do Evento no formato "EVENTO | Fluxo=NomeDoFluxo | Campo={Campo}".
+
 csharp// ✅ CORRETO
 _logger.LogInformation(
     "LOTE_INICIADO | Fluxo=Handle | TotalRegistros={TotalRegistros}",
@@ -74,23 +154,7 @@ _logger.LogCritical(
 // ❌ ERRADO — não usar
 _logger.Info("Total de registros: {0}", totalRegistros);
 _logger.ProcessStart("Handle", new { ... });
-_logger.Warning("Validacao falhou: {0}", erros);
+EventoNívelLOTE_INICIADOInformationCONSULTA_REALIZADAInformationKAFKA_PUBLICADOInformationLOTE_CONCLUIDOInformationWORKER_INICIADOInformationWORKER_AGUARDANDOInformationRETRY_TENTATIVAWarningRECONEXAO_KAFKAWarningFALHA_PARCIALErrorFALHA_SERIALIZACAOErrorFALHA_DEPENDENCIAErrorLOTE_ABORTADOCritical
 
-O que NÃO alterar
-
-Lógica de negócio (repositórios, services, processamento)
-Configurações do Kafka, Schema Registry, Consumer/Producer
-Estrutura dos Commands, CommandResults e DTOs
-Testes unitários — apenas atualizar mocks de IAppLogger para ILogger<T>
-
-
-Critérios de aceite
-
- Nenhum uso de IAppLogger restante no código de produção
- Nenhum uso de _logger.Info, _logger.Warning, _logger.Error, _logger.Critical, _logger.ProcessStart, _logger.ProcessEnd
- Todo log dentro de fluxo de lote está dentro de um bloco using var logCtx = new LoteLogContext(...)
- O campo Evento usa apenas os valores do catálogo acima
- A mensagem sempre inicia com o valor do Evento
- LoteLogContext é reaberto dentro de Task.Run quando necessário
- DD_API_KEY vem de variável de ambiente — nunca hardcoded
- Build sem erros
+Não alterar: Lógica de negócio, repositórios, services, configurações do Kafka, Commands, CommandResults e DTOs. Nos testes unitários, apenas atualizar mocks de IAppLogger para ILogger<T>.
+Antes de prosseguir com a implementação e ajustes, sempre gere um arquivo para que eu possa revisar as alterações propostas. Só após eu dar o ok, pode seguir com a implementação.
