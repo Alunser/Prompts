@@ -1,21 +1,303 @@
-Prompt para Devin:
+Prompt para Devin — Correção: Reprocessamento + Publicação com Falha
+Contexto
+Dois bugs críticos identificados em produção que precisam ser corrigidos juntos:
+Bug 1: Quando a publicação do retorno falha, a mensagem é commitada mesmo assim
+— o retorno se perde silenciosamente.
+Bug 2: Quando a mensagem é reprocessada (porque o retorno não foi publicado),
+o handler encontra o movimento já existente no banco e retorna 422 — mas deveria
+retornar 200, pois o movimento foi processado com sucesso anteriormente.
 
-Erro em produção:
-Cannot consume scoped service 'IMensagemProcessador' from singleton 'IHostedService'
-Causa: ProcessarMovimentoContabilWorker é Singleton mas IMensagemProcessador está registrado como Scoped. Singleton não pode consumir Scoped diretamente no .NET DI.
-Correção no Program.cs:
-Verificar o registro de TODAS as dependências do MensagemProcessador:
+Evidência no Datadog
+18:46:08 → Producer FAIL — Disconnected (após ociosidade)
+18:46:08 → Movimento contabil inserido com sucesso ← gravou no banco
+18:46:08 → Publicação do retorno falhou
+18:46:08 → Mensagem NÃO voltou ao tópico ← commit aconteceu mesmo com falha!
+           Retorno nunca entregue ao consumidor ❌
 
-IMensagemProcessador
-IProcessarMovimentoContabilWorkerHandler
-IRetornoMovimentoContabilService
-IKafkaConsumerChannel
+⚠️ Regras obrigatórias
 
-Todas devem ser registradas como Singleton:
-csharpbuilder.Services.AddSingleton<IMensagemProcessador, MensagemProcessador>();
-builder.Services.AddSingleton<IProcessarMovimentoContabilWorkerHandler, ProcessarMovimentoContabilWorkerHandler>();
-OU — se qualquer uma dessas dependências usar DbContext ou outro serviço Scoped, injetar IServiceProvider no Worker e criar scope por mensagem:
-csharpusing var scope = _serviceProvider.CreateScope();
-var processador = scope.ServiceProvider.GetRequiredService<IMensagemProcessador>();
-await processador.ProcessarAsync(mensagem, stoppingToken);
-Verificar qual das duas opções se aplica analisando as dependências transitivas antes de implementar. Não mudar nenhuma lógica de negócio.
+NÃO alterar nenhuma outra lógica de validação de negócio
+NÃO alterar repositórios, entities ou commands
+Fazer APENAS as alterações descritas abaixo
+Analisar o código atual antes de alterar — confirmar onde está o bug
+
+
+Passo 1 — Análise obrigatória antes de qualquer alteração
+Antes de alterar qualquer código, analisar e confirmar:
+
+PublicarRetornosSeExistir no MensagemProcessador — verifica se a publicação
+foi bem sucedida antes de retornar? Ou apenas loga o erro e continua?
+ProcessarAsync no MensagemProcessador — verifica o resultado da publicação
+antes de chamar CommitarMensagem? Ou commita independente do resultado?
+PublicarEmLote no RetornoMovimentoContabilService — quando o producer falha,
+retorna Success = false ou lança exception?
+Trecho do movimentoExistente no ProcessarMovimentoContabilWorkerHandler —
+quando o movimento já existe, retorna 422 ou 200?
+
+
+Correção 1 — ProcessarMovimentoContabilWorkerHandler.cs
+FX9.ProcessaMovimentoContabil.Application/UseCases/Handlers/ProcessarMovimentoContabilWorkerHandler.cs
+Localizar o trecho atual
+csharpvar movimentoExistente = await _movimentoContabilRepository
+    .VerificarMovimentoContabilExistenteAsync(
+        movimento.CodigoIdentificacaoMovimentacaoFinanceira);
+
+if (movimentoExistente)
+{
+    _logger.LogWarning(
+        "Evento ja processado. CodigoIdentificacaoMovimentacaoFinanceira: {Codigo}",
+        movimento.CodigoIdentificacaoMovimentacaoFinanceira);
+
+    return await FinalizarProcessamentoAsync(
+        movimento, retorno, retornosParaPublicar, false,
+        $"Evento ja foi processado anteriormente...");
+}
+Substituir por
+csharpvar movimentoExistente = await _movimentoContabilRepository
+    .VerificarMovimentoContabilExistenteAsync(
+        movimento.CodigoIdentificacaoMovimentacaoFinanceira);
+
+if (movimentoExistente)
+{
+    // Movimento já foi processado com sucesso anteriormente.
+    // Pode ser reprocessamento legítimo por falha técnica na publicação
+    // do retorno (ex: producer Kafka desconectado).
+    // Retorna sucesso e republica o retorno para garantir a entrega.
+    _logger.LogInformation(
+        "Movimento já processado anteriormente. Republicando retorno de sucesso. " +
+        "CodigoIdentificacaoMovimentacaoFinanceira: {Codigo}",
+        movimento.CodigoIdentificacaoMovimentacaoFinanceira);
+
+    return await FinalizarProcessamentoAsync(
+        movimento, retorno, retornosParaPublicar, true); // ← true = sucesso, não 422
+}
+
+Correção 2 — MensagemProcessador.cs
+FX9.ProcessaMovimentoContabil.Application/UseCases/Processadores/MensagemProcessador.cs
+Substituir o método PublicarRetornosSeExistir por
+csharpprivate async Task<bool> PublicarRetornosSeExistir(
+    List<RetornoMovimentoContabil> retornosParaPublicar)
+{
+    if (!retornosParaPublicar.Any()) return true;
+
+    var resultado = await _retornoMovimentoContabilService
+        .PublicarEmLote(retornosParaPublicar);
+
+    if (!resultado.Success)
+    {
+        _logger.LogError(
+            "Falha ao publicar retornos. " +
+            "Mensagem não será commitada — Kafka irá reenviar.");
+        return false;
+    }
+
+    return true;
+}
+Substituir o método ProcessarAsync por
+csharppublic async Task ProcessarAsync(
+    ConsumeResult<string, RecebimentoMovimentoContabil> consumeResult,
+    CancellationToken cancellationToken)
+{
+    try
+    {
+        var retornosParaPublicar = new List<RetornoMovimentoContabil>();
+
+        // ✅ Lógica de negócio existente — não alterar
+        var resultado = await _handler.ProcessarMensagemIndividual(
+            consumeResult,
+            retornosParaPublicar,
+            cancellationToken);
+
+        // ✅ Verifica se publicação foi bem sucedida antes de commitar
+        var publicacaoOk = await PublicarRetornosSeExistir(retornosParaPublicar);
+
+        if (!publicacaoOk)
+        {
+            // Publicação falhou — não commita → Kafka reenvia para nova tentativa
+            _logger.LogWarning(
+                "Publicação do retorno falhou. " +
+                "Mensagem não commitada — Kafka irá reenviar. " +
+                "Offset: {Offset} Partição: {Particao}",
+                consumeResult.Offset,
+                consumeResult.Partition);
+            return;
+        }
+
+        if (DeveCommitar(resultado))
+            CommitarMensagem(consumeResult);
+        else
+            LogarErroSemCommit(consumeResult);
+    }
+    catch (Exception ex)
+    {
+        // Não commita — Kafka irá reenviar automaticamente
+        _logger.LogError(ex,
+            "Erro inesperado ao processar mensagem. " +
+            "Kafka irá reenviar automaticamente.");
+    }
+}
+
+Correção 3 — RetornoMovimentoContabilService.cs
+FX9.ProcessaMovimentoContabil.Infra.Data/Services/RetornoMovimentoContabilService.cs
+Garantir que quando o producer falha o método PublicarEmLote retorna
+Success = false em vez de lançar exception não tratada.
+Verificar se os catches existentes já retornam CommandResult com erro.
+Se não, adicionar:
+csharpcatch (KafkaException ex)
+{
+    _logger.LogError(ex,
+        "KafkaException ao produzir mensagem para o tópico.");
+
+    var commandResult = new CommandResult(
+        (int)HttpStatusCode.InternalServerError);
+    commandResult.AddNotification(
+        "RetornoMovimentoContabilService",
+        "Erro no processo de publicar retorno movimento contabil.");
+
+    return commandResult; // ← retorna falha, não lança exception
+}
+catch (Exception ex)
+{
+    _logger.LogError(ex,
+        "Erro inesperado ao publicar retornos em lote.");
+
+    var commandResult = new CommandResult(
+        (int)HttpStatusCode.InternalServerError);
+    commandResult.AddNotification(
+        "RetornoMovimentoContabilService",
+        "Erro inesperado ao publicar retornos em lote.");
+
+    return commandResult; // ← retorna falha, não lança exception
+}
+
+Regra de commit final
+Processou com sucesso (200) + publicou retorno ✅  → Commita
+Processou com erro de negócio (422) + publicou retorno ✅ → Commita
+Movimento já existia no banco + publicou retorno ✅ → Commita (200, não 422!)
+Publicação do retorno falhou ❌ → NÃO commita → Kafka reenvia
+Erro inesperado (500) → NÃO commita → Kafka reenvia
+Exception inesperada → NÃO commita → Kafka reenvia
+
+Testes unitários a adicionar/ajustar
+ProcessarMovimentoContabilWorkerHandler — movimento existente retorna 200
+csharp[Fact]
+public async Task ProcessarMensagemIndividual_QuandoMovimentoJaExiste_DeveRetornarSucessoERepublicarRetorno()
+{
+    // Arrange
+    var recebimentoResult = CriarRecebimentoResultFake();
+    var retornosParaPublicar = new List<RetornoMovimentoContabil>();
+
+    _movimentoContabilRepositoryMock
+        .Setup(x => x.VerificarMovimentoContabilExistenteAsync(
+            It.IsAny<string>()))
+        .ReturnsAsync(true);
+
+    // Act
+    var resultado = await _handler.ProcessarMensagemIndividual(
+        recebimentoResult, retornosParaPublicar, CancellationToken.None);
+
+    // Assert
+    resultado.StatusCode.Should().Be((int)HttpStatusCode.OK); // ← 200, não 422!
+    retornosParaPublicar.Should().NotBeEmpty(); // ← republica retorno de sucesso
+}
+MensagemProcessador — publicação falha não deve commitar
+csharp[Fact]
+public async Task ProcessarAsync_QuandoPublicacaoFalha_NaoDeveCommitar()
+{
+    // Arrange
+    var consumeResult = CriarConsumeResultFake();
+
+    _handlerMock
+        .Setup(x => x.ProcessarMensagemIndividual(
+            It.IsAny<RecebimentoMovimentoContabilCommandResult>(),
+            It.IsAny<List<RetornoMovimentoContabil>>(),
+            It.IsAny<CancellationToken>()))
+        .Callback<RecebimentoMovimentoContabilCommandResult,
+            List<RetornoMovimentoContabil>, CancellationToken>(
+            (_, retornos, _) => retornos.Add(new RetornoMovimentoContabil()))
+        .ReturnsAsync(new CommandResult((int)HttpStatusCode.OK));
+
+    _retornoServiceMock
+        .Setup(x => x.PublicarEmLote(
+            It.IsAny<List<RetornoMovimentoContabil>>()))
+        .ReturnsAsync(new CommandResult((int)HttpStatusCode.InternalServerError));
+
+    // Act
+    await _processador.ProcessarAsync(consumeResult, CancellationToken.None);
+
+    // Assert — não commita quando publicação falha
+    _kafkaConsumerChannelMock
+        .Verify(x => x.CommitarMensagem(
+            It.IsAny<ConsumeResult<string, RecebimentoMovimentoContabil>>()),
+            Times.Never);
+}
+MensagemProcessador — publicação sucesso deve commitar
+csharp[Fact]
+public async Task ProcessarAsync_QuandoPublicacaoSucesso_DeveCommitar()
+{
+    // Arrange
+    var consumeResult = CriarConsumeResultFake();
+
+    _handlerMock
+        .Setup(x => x.ProcessarMensagemIndividual(
+            It.IsAny<RecebimentoMovimentoContabilCommandResult>(),
+            It.IsAny<List<RetornoMovimentoContabil>>(),
+            It.IsAny<CancellationToken>()))
+        .Callback<RecebimentoMovimentoContabilCommandResult,
+            List<RetornoMovimentoContabil>, CancellationToken>(
+            (_, retornos, _) => retornos.Add(new RetornoMovimentoContabil()))
+        .ReturnsAsync(new CommandResult((int)HttpStatusCode.OK));
+
+    _retornoServiceMock
+        .Setup(x => x.PublicarEmLote(
+            It.IsAny<List<RetornoMovimentoContabil>>()))
+        .ReturnsAsync(new CommandResult((int)HttpStatusCode.OK));
+
+    // Act
+    await _processador.ProcessarAsync(consumeResult, CancellationToken.None);
+
+    // Assert — commita quando publicação é bem sucedida
+    _kafkaConsumerChannelMock
+        .Verify(x => x.CommitarMensagem(consumeResult), Times.Once);
+}
+MensagemProcessador — sem retornos para publicar deve commitar normalmente
+csharp[Fact]
+public async Task ProcessarAsync_QuandoSemRetornosParaPublicar_DeveCommitarSemPublicar()
+{
+    // Arrange
+    var consumeResult = CriarConsumeResultFake();
+
+    _handlerMock
+        .Setup(x => x.ProcessarMensagemIndividual(
+            It.IsAny<RecebimentoMovimentoContabilCommandResult>(),
+            It.IsAny<List<RetornoMovimentoContabil>>(),
+            It.IsAny<CancellationToken>()))
+        .ReturnsAsync(new CommandResult((int)HttpStatusCode.OK));
+
+    // Act
+    await _processador.ProcessarAsync(consumeResult, CancellationToken.None);
+
+    // Assert
+    _retornoServiceMock
+        .Verify(x => x.PublicarEmLote(
+            It.IsAny<List<RetornoMovimentoContabil>>()),
+            Times.Never); // ← não publica se lista vazia
+
+    _kafkaConsumerChannelMock
+        .Verify(x => x.CommitarMensagem(consumeResult), Times.Once); // ← commita
+}
+
+Checklist final
+
+ Analisar código atual antes de alterar (4 pontos do Passo 1)
+ ProcessarMovimentoContabilWorkerHandler — movimento existente retorna 200
+ ProcessarMovimentoContabilWorkerHandler — log alterado de Warning para Information
+ MensagemProcessador.PublicarRetornosSeExistir retorna bool
+ MensagemProcessador.ProcessarAsync não commita quando publicação falha
+ RetornoMovimentoContabilService nunca lança exception não tratada
+ Teste: movimento existente retorna 200 e republica retorno
+ Teste: publicação falha → não commita
+ Teste: publicação sucesso → commita
+ Teste: sem retornos → commita sem publicar
+ Todos os testes passando
+ Nenhuma outra lógica de negócio alterada
