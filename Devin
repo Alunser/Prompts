@@ -1,277 +1,112 @@
-Prompt para Devin — Simplificação da Arquitetura do Consumer Kafka
-Contexto
-A arquitetura atual foi implementada com classes em excesso. O objetivo é simplificar
-removendo KafkaMensagemProdutor e WorkerChannelFactory, absorvendo suas
-responsabilidades nas classes que já existem, sem alterar nenhuma lógica de negócio.
+Prompt para Devin — Correção dos 3 Bugs Críticos do Consumer Kafka
+⚠️ ATENÇÃO — LEIA ANTES DE COMEÇAR
 
-⚠️ Regras obrigatórias
-
-NÃO alterar nenhuma lógica de validação, processamento ou mapeamento
-NÃO alterar MensagemProcessador e IMensagemProcessador
-NÃO alterar ProcessarMovimentoContabilWorkerHandler
-NÃO alterar repositórios, entities ou commands
+NÃO criar novas classes
+NÃO criar PartitionOffsetTracker ou qualquer tracker de offset
+NÃO criar SortedSet, fila de offsets ou controle de offsets
+NÃO alterar a lógica de negócio existente
+Fazer APENAS as alterações descritas abaixo, nada além disso
 
 
-Resumo das alterações
-ClasseAçãoKafkaMensagemProdutor.cs❌ DeletarIKafkaMensagemProdutor.cs❌ DeletarWorkerChannelFactory.cs❌ DeletarIWorkerChannelFactory.cs❌ DeletarIKafkaConsumerChannel.cs🔄 Atualizar — adicionar ProduzirParaChannelAsyncKafkaConsumerChannel.cs🔄 Atualizar — absorver lógica do produtorProcessarMovimentoContabilWorker.cs🔄 Atualizar — criar channel internamenteProgram.cs🔄 Atualizar — remover registros obsoletos
+Bug 1 — Handler não registrado no DI
+Arquivo a alterar
+FX9.ProcessaMovimentoContabil.Worker/Program.cs
+Adicionar o registro abaixo junto aos demais registros de Scoped:
+csharpbuilder.Services.AddScoped<ProcessarMovimentoContabilWorkerHandler>();
 
-Alterações necessárias
-
-1. Deletar arquivos
-Deletar os seguintes arquivos do projeto FX9.ProcessaMovimentoContabil.Infra.Messaging/Consumers/:
-
-KafkaMensagemProdutor.cs
-IKafkaMensagemProdutor.cs
-
-Deletar os seguintes arquivos do projeto FX9.ProcessaMovimentoContabil.Worker/Factories/:
-
-WorkerChannelFactory.cs
-IWorkerChannelFactory.cs
-
-
-⚠️ Se a pasta Factories/ ficar vazia após deletar, deletar a pasta também.
-
-
-2. IKafkaConsumerChannel.cs — atualizar interface
-Substituir o conteúdo completo pelo código abaixo:
-csharp// FX9.ProcessaMovimentoContabil.Infra.Messaging
-// Consumers/IKafkaConsumerChannel.cs
-
-namespace FX9.ProcessaMovimentoContabil.Infra.Messaging.Consumers;
-
-public interface IKafkaConsumerChannel
-{
-    void Inicializar(string nomeTopico);
-
-    Task ProduzirParaChannelAsync(
-        ChannelWriter<ConsumeResult<string, RecebimentoMovimentoContabil>> channelWriter,
-        CancellationToken cancellationToken);
-
-    void CommitarMensagem(
-        ConsumeResult<string, RecebimentoMovimentoContabil> consumeResult);
-
-    void Encerrar();
-}
-
-3. KafkaConsumerChannel.cs — absorver lógica do produtor
-Substituir o conteúdo completo pelo código abaixo:
-csharp// FX9.ProcessaMovimentoContabil.Infra.Messaging
-// Consumers/KafkaConsumerChannel.cs
-
-namespace FX9.ProcessaMovimentoContabil.Infra.Messaging.Consumers;
-
-public class KafkaConsumerChannel : IKafkaConsumerChannel
+Bug 2 — _commitLock não protege commit concorrente
+O _commitLock está no MensagemProcessador que é Scoped — cada mensagem
+cria uma instância nova com seu próprio lock, então o lock não protege nada.
+O IConsumer do Kafka não é thread-safe e precisa de proteção no singleton.
+Arquivo a alterar
+FX9.ProcessaMovimentoContabil.Infra.Messaging/Consumers/KafkaConsumerChannel.cs
+Adicionar o campo _commitLock e proteger o método CommitarMensagem:
+csharppublic class KafkaConsumerChannel : IKafkaConsumerChannel
 {
     private readonly IKafkaConsumerFactory _kafkaConsumerFactory;
     private readonly ILogger<KafkaConsumerChannel> _logger;
+    private readonly object _commitLock = new(); // ← adicionar aqui
 
     private IConsumer<string, RecebimentoMovimentoContabil> _consumer;
 
-    public KafkaConsumerChannel(
-        IKafkaConsumerFactory kafkaConsumerFactory,
-        ILogger<KafkaConsumerChannel> logger)
-    {
-        _kafkaConsumerFactory = kafkaConsumerFactory;
-        _logger = logger;
-    }
-
-    public void Inicializar(string nomeTopico)
-    {
-        _consumer = _kafkaConsumerFactory
-            .CreateConsumer<RecebimentoMovimentoContabil>(useAvroDeserializer: true);
-
-        _consumer.Subscribe(nomeTopico);
-
-        _logger.LogInformation(
-            "Consumer Kafka inicializado. Tópico: {Topico}", nomeTopico);
-    }
-
-    public async Task ProduzirParaChannelAsync(
-        ChannelWriter<ConsumeResult<string, RecebimentoMovimentoContabil>> channelWriter,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                try
-                {
-                    var mensagem = _consumer.Consume(cancellationToken);
-
-                    if (mensagem is null) continue;
-
-                    await channelWriter.WriteAsync(mensagem, cancellationToken);
-                }
-                catch (ConsumeException ex)
-                    when (ex.Error.Code == ErrorCode.UnknownTopicOrPart)
-                {
-                    _logger.LogWarning(
-                        "Tópico ainda não disponível. " +
-                        "Tentando novamente em 2 segundos.");
-
-                    await Task.Delay(2000, cancellationToken);
-                }
-                catch (ConsumeException ex)
-                {
-                    _logger.LogError(ex,
-                        "Erro ao consumir mensagem do Kafka. Continuando...");
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogInformation("Leitura do Kafka encerrada.");
-        }
-        finally
-        {
-            channelWriter.Complete();
-        }
-    }
+    // ... construtor sem alteração ...
 
     public void CommitarMensagem(
         ConsumeResult<string, RecebimentoMovimentoContabil> consumeResult)
-        => _consumer.Commit(consumeResult);
-
-    public void Encerrar()
     {
-        _consumer.Close();
-        _logger.LogInformation("Consumer Kafka encerrado.");
+        // lock aqui pois KafkaConsumerChannel é singleton e IConsumer não é thread-safe
+        lock (_commitLock)
+        {
+            _consumer.Commit(consumeResult);
+        }
     }
+
+    // ... demais métodos sem alteração ...
+}
+Arquivo a alterar
+FX9.ProcessaMovimentoContabil.Application/UseCases/Processadores/MensagemProcessador.cs
+Remover o campo _commitLock e simplificar o método CommitarMensagemProcessada:
+csharp// Remover este campo
+private readonly object _commitLock = new();
+
+// Substituir o método CommitarMensagemProcessada por:
+private void CommitarMensagemProcessada(
+    ConsumeResult<string, RecebimentoMovimentoContabil> consumeResult)
+{
+    // O lock está no KafkaConsumerChannel (singleton) — não precisa de lock aqui
+    _kafkaConsumerChannel.CommitarMensagem(consumeResult);
+
+    _logger.LogInformation("Mensagem processada e commitada com sucesso.");
 }
 
-4. ProcessarMovimentoContabilWorker.cs — simplificar
-Substituir o conteúdo completo pelo código abaixo:
-csharp// FX9.ProcessaMovimentoContabil.Worker
-// Workers/ProcessarMovimentoContabilWorker.cs
-
-namespace FX9.ProcessaMovimentoContabil.Worker.Workers;
-
-public class ProcessarMovimentoContabilWorker : BackgroundService
+Bug 3 — Consumer Kafka nunca fechado ao cancelar
+O _kafkaConsumerChannel.Encerrar() não é chamado quando o
+CancellationToken é cancelado pois o OperationCanceledException
+propaga antes de chegar na linha do Encerrar().
+Arquivo a alterar
+FX9.ProcessaMovimentoContabil.Worker/Workers/ProcessarMovimentoContabilWorker.cs
+Substituir o método ExecuteAsync pelo código abaixo:
+csharpprotected override async Task ExecuteAsync(CancellationToken stoppingToken)
 {
-    private readonly IKafkaConsumerChannel _kafkaConsumerChannel;
-    private readonly IMensagemProcessador _mensagemProcessador;
-    private readonly KafkaConfiguration _kafkaConfiguration;
-    private readonly WorkerConfiguration _workerConfiguration;
-    private readonly ILogger<ProcessarMovimentoContabilWorker> _logger;
+    var topicConfiguration = ObterConfiguracaoTopico();
 
-    public ProcessarMovimentoContabilWorker(
-        IKafkaConsumerChannel kafkaConsumerChannel,
-        IMensagemProcessador mensagemProcessador,
-        KafkaConfiguration kafkaConfiguration,
-        WorkerConfiguration workerConfiguration,
-        ILogger<ProcessarMovimentoContabilWorker> logger)
+    if (topicConfiguration is null || !topicConfiguration.Enable)
     {
-        _kafkaConsumerChannel = kafkaConsumerChannel;
-        _mensagemProcessador = mensagemProcessador;
-        _kafkaConfiguration = kafkaConfiguration;
-        _workerConfiguration = workerConfiguration;
-        _logger = logger;
+        _logger.LogWarning(
+            "Configuração do tópico não habilitada ou não encontrada.");
+        return;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    _kafkaConsumerChannel.Inicializar(topicConfiguration.Name);
+
+    _logger.LogInformation(
+        "Worker iniciado. Tópico: {Topico}. Workers paralelos: {Workers}",
+        topicConfiguration.Name,
+        _workerConfiguration.ParallelWorkers);
+
+    var channel = CriarChannel();
+
+    try
     {
-        var topicConfiguration = ObterConfiguracaoTopico();
-
-        if (topicConfiguration is null || !topicConfiguration.Enable)
-        {
-            _logger.LogWarning(
-                "Configuração do tópico não habilitada ou não encontrada.");
-            return;
-        }
-
-        _kafkaConsumerChannel.Inicializar(topicConfiguration.Name);
-
-        _logger.LogInformation(
-            "Worker iniciado. Tópico: {Topico}. Workers paralelos: {Workers}",
-            topicConfiguration.Name,
-            _workerConfiguration.ParallelWorkers);
-
-        var channel = Channel
-            .CreateBounded<ConsumeResult<string, RecebimentoMovimentoContabil>>(
-                new BoundedChannelOptions(_workerConfiguration.ChannelCapacity)
-                {
-                    FullMode = BoundedChannelFullMode.Wait,
-                    SingleWriter = true,
-                    SingleReader = false
-                });
-
         await ExecutarProducaoEProcessamentoAsync(channel, stoppingToken);
-
+    }
+    finally
+    {
+        // Garante que o consumer sempre fecha corretamente
+        // mesmo quando CancellationToken é cancelado
         _kafkaConsumerChannel.Encerrar();
-
         _logger.LogInformation("Worker encerrado.");
     }
-
-    private async Task ExecutarProducaoEProcessamentoAsync(
-        Channel<ConsumeResult<string, RecebimentoMovimentoContabil>> channel,
-        CancellationToken stoppingToken)
-    {
-        var producaoTask = _kafkaConsumerChannel
-            .ProduzirParaChannelAsync(channel.Writer, stoppingToken);
-
-        var processamentoTasks = CriarWorkersDeProcessamento(
-            channel.Reader, stoppingToken);
-
-        await Task.WhenAll(new[] { producaoTask }.Concat(processamentoTasks));
-    }
-
-    private IEnumerable<Task> CriarWorkersDeProcessamento(
-        ChannelReader<ConsumeResult<string, RecebimentoMovimentoContabil>> channelReader,
-        CancellationToken stoppingToken)
-        => Enumerable
-            .Range(0, _workerConfiguration.ParallelWorkers)
-            .Select(_ => Task.Run(
-                async () => await ProcessarMensagensDoChannelAsync(
-                    channelReader, stoppingToken),
-                stoppingToken));
-
-    private async Task ProcessarMensagensDoChannelAsync(
-        ChannelReader<ConsumeResult<string, RecebimentoMovimentoContabil>> channelReader,
-        CancellationToken stoppingToken)
-    {
-        await foreach (var mensagem in channelReader.ReadAllAsync(stoppingToken))
-        {
-            await _mensagemProcessador.ProcessarAsync(mensagem, stoppingToken);
-        }
-    }
-
-    private TopicConfiguration ObterConfiguracaoTopico()
-        => _kafkaConfiguration
-            .ConsumerConfiguration
-            .TopicConfigurations
-            .FirstOrDefault(x => x.Tipo == ETipoTopico.RecebimentosMovimentoContabil);
 }
-
-5. Program.cs — remover registros obsoletos
-Remover os seguintes registros:
-csharp// ❌ Remover
-builder.Services.AddSingleton<IKafkaMensagemProdutor, KafkaMensagemProdutor>();
-builder.Services.AddSingleton<IWorkerChannelFactory, WorkerChannelFactory>();
-
-Estrutura final esperada
-Infra.Messaging
-  └── Consumers/
-      ├── IKafkaConsumerChannel.cs   ✅
-      └── KafkaConsumerChannel.cs    ✅
-
-Application
-  └── UseCases/Processadores/
-      ├── IMensagemProcessador.cs    ✅
-      └── MensagemProcessador.cs     ✅
-
-Worker
-  └── Workers/
-      └── ProcessarMovimentoContabilWorker.cs  ✅
 
 Checklist final
 
- KafkaMensagemProdutor.cs deletado
- IKafkaMensagemProdutor.cs deletado
- WorkerChannelFactory.cs deletado
- IWorkerChannelFactory.cs deletado
- IKafkaConsumerChannel atualizado com ProduzirParaChannelAsync
- KafkaConsumerChannel atualizado absorvendo lógica do produtor
- ProcessarMovimentoContabilWorker simplificado
- Program.cs com registros obsoletos removidos
+ ProcessarMovimentoContabilWorkerHandler registrado no Program.cs
+ _commitLock movido para KafkaConsumerChannel
+ CommitarMensagem protegido com lock no KafkaConsumerChannel
+ _commitLock removido do MensagemProcessador
+ ExecuteAsync com try/finally garantindo Encerrar()
+ Nenhuma classe nova criada
+ Nenhum PartitionOffsetTracker ou tracker de offset criado
  Projeto compila sem erros
- Nenhuma lógica de validação foi alterada
+ Nenhuma lógica de negócio alterada
