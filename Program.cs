@@ -5,11 +5,13 @@
 // ║    <PackageReference Include="Confluent.Kafka" Version="2.4.0" />       ║
 // ║    <PackageReference Include="Confluent.SchemaRegistry" Version="2.4.0" />
 // ║    <PackageReference Include="Confluent.SchemaRegistry.Serdes.Avro" Version="2.4.0" />
+// ║    <PackageReference Include="Itau.KaasCertClient" Version="*" />       ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
 
 using Confluent.Kafka;
 using Confluent.SchemaRegistry;
 using Confluent.SchemaRegistry.Serdes;
+using Itau.KaasCertClient;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -20,7 +22,13 @@ const string TOPIC             = "emprestimos-e-financiamentos-recebimentos-movi
 const string SCHEMA_REGISTRY   = "https://schema-registry.dev.aws.cloud.ihf:8082";
 const string CA_CERT           = "./certs/caroot.crt";
 const string P12_LOCATION      = "./certs/FX90008.p12";
-const string P12_PASSWORD      = ""; // preencha se necessário
+const string P12_PASSWORD      = "tj3hm@^^NrLG+SJp";
+const string CLIENT_USER       = "FX90008";
+const string CLIENT_PASSWORD   = "n0tNKg3SHWpaXsTdm2QAiZVrFH1j1WPeHVenqawdSQp8x7fr8FYQ==";
+const string KAAS_ENVIRONMENT  = "Development";
+const string KAAS_APP_NAME     = "Worker Processar Movimento Contabil";
+const string KAAS_COMMUNITY    = "CONSORCIO";
+const string KAAS_SIGLA        = "FX9";
 
 // ─── Banner ───────────────────────────────────────────────────────────────────
 Console.ForegroundColor = ConsoleColor.Cyan;
@@ -40,6 +48,27 @@ Log($"Tópico      : {TOPIC}");
 Log($"Schema Reg. : {SCHEMA_REGISTRY}");
 Log($"ClientId    : {CLIENT_ID}");
 Log($"Cert P12    : {P12_LOCATION}");
+Console.WriteLine();
+
+// ─── Geração de Certificado via KaasCertClient ───────────────────────────────
+Log("Gerando certificado via KAAS...");
+try
+{
+    await KaasCertClientManager.NewConfigure(KAAS_ENVIRONMENT)
+        .WithAppName(KAAS_APP_NAME)
+        .WithCommunity(KAAS_COMMUNITY)
+        .WithSigla(KAAS_SIGLA)
+        .WithCaCertLocation(CA_CERT)
+        .WithClientUserAndPassword(CLIENT_USER, CLIENT_PASSWORD)
+        .WithP12LocationAndPassword(P12_LOCATION, P12_PASSWORD)
+        .GoConfigure();
+    LogSuccess("Certificado gerado com sucesso.");
+}
+catch (Exception ex)
+{
+    LogError($"Falha ao gerar certificado: {ex.Message}");
+    return;
+}
 Console.WriteLine();
 
 // ─── Schema Registry ──────────────────────────────────────────────────────────
