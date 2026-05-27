@@ -60,4 +60,470 @@ Checklist final
  reconnect.backoff.max.ms adicionado em todos os appsettings
  Nenhum campo existente removido
  Nenhum código alterado
- Alteração aplicada em TODOS os ambientes
+ Alteração aplicada em 
+
+
+
+
+
+
+
+
+
+
+
+
+===========================================================================
+
+
+Prompt para Devin — Refatorar Producer para Assinatura Unitária
+Contexto
+O RetornoMovimentoContabilService recebia uma lista de retornos, mas na prática
+sempre chega 1 retorno por mensagem — pois o consumer processa 1 mensagem por vez
+de forma sequencial. A refatoração simplifica a assinatura para refletir a realidade,
+remove complexidade desnecessária e deixa o código mais limpo e seguro.
+
+⚠️ Regras obrigatórias
+
+NÃO alterar nenhuma lógica de negócio existente
+NÃO alterar ProcessarMovimentoContabilWorkerHandler
+Atualizar TODOS os locais que chamam PublicarEmLote
+Fazer APENAS as alterações descritas abaixo
+
+
+Alteração 1 — Interface
+FX9.ProcessaMovimentoContabil.Domain/Interfaces/Services/IRetornoMovimentoContabilService.cs
+csharppublic interface IRetornoMovimentoContabilService : IDisposable
+{
+    Task<ICommandResult> Publicar(
+        Domain.Entities.RetornoMovimentoContabil retorno);
+}
+
+Alteração 2 — RetornoMovimentoContabilService.cs
+FX9.ProcessaMovimentoContabil.Infra.Data/Services/RetornoMovimentoContabilService.cs
+Substituir o conteúdo completo pelo código abaixo:
+csharpnamespace FX9.ProcessaMovimentoContabil.Infra.Data.Services;
+
+public class RetornoMovimentoContabilService :
+    IRetornoMovimentoContabilService, IDisposable
+{
+    private static readonly byte[] HeaderSpecversion =
+        Encoding.UTF8.GetBytes("0.1");
+    private static readonly byte[] HeaderType =
+        Encoding.UTF8.GetBytes("br.com.itau.emprestimos_e_financiamentos_consorcios");
+    private static readonly byte[] HeaderSource =
+        Encoding.UTF8.GetBytes("urn:fx9:retornomovimentocontabil");
+    private static readonly byte[] HeaderMessageversion =
+        Encoding.UTF8.GetBytes("0.1");
+    private static readonly byte[] HeaderDatacontenttype =
+        Encoding.UTF8.GetBytes("application/avro");
+
+    private readonly KafkaConfiguration _kafkaConfiguration;
+    private readonly IKafkaProducerFactory _producerFactory;
+    private readonly ILogger<RetornoMovimentoContabilService> _logger;
+
+    // ✅ Lazy garante inicialização thread-safe do producer singleton
+    private readonly Lazy<IProducer<string, RetornoMovimentoContabil>> _producer;
+    private TopicConfiguration? _cachedTopicConfiguration;
+    private bool _disposed;
+
+    public RetornoMovimentoContabilService(
+        KafkaConfiguration kafkaConfiguration,
+        IKafkaProducerFactory producerFactory,
+        ILogger<RetornoMovimentoContabilService> logger)
+    {
+        _kafkaConfiguration = kafkaConfiguration;
+        _producerFactory = producerFactory;
+        _logger = logger;
+
+        _producer = new Lazy<IProducer<string, RetornoMovimentoContabil>>(
+            () => _producerFactory.CreateProducer<RetornoMovimentoContabil>());
+    }
+
+    public Task<ICommandResult> Publicar(
+        Domain.Entities.RetornoMovimentoContabil retorno)
+    {
+        var topicConfiguration = ObterConfiguracaoTopico();
+
+        if (topicConfiguration is null || !topicConfiguration.Enable)
+        {
+            _logger.LogCritical(
+                "Publicar: Configuração do tópico não habilitada ou não encontrada.");
+
+            return Task.FromResult<ICommandResult>(
+                new CommandResult((int)HttpStatusCode.BadRequest));
+        }
+
+        try
+        {
+            var mensagem = CriarMensagem(retorno);
+
+            // ✅ Produce síncrono — coloca na fila interna instantaneamente
+            _producer.Value.Produce(
+                topicConfiguration.Name,
+                mensagem,
+                deliveryReport =>
+                {
+                    // Delivery handler chamado em background pelo producer
+                    if (deliveryReport.Error.IsError)
+                        _logger.LogError(
+                            "Falha ao publicar retorno. " +
+                            "Codigo: {Codigo} Erro: {Erro}",
+                            retorno.CodigoIdentificacaoMovimentacaoFinanceira,
+                            deliveryReport.Error.Reason);
+                    else
+                        _logger.LogInformation(
+                            "Retorno publicado com sucesso. Codigo: {Codigo}",
+                            retorno.CodigoIdentificacaoMovimentacaoFinanceira);
+                });
+
+            // ✅ Flush aguarda ACK do broker antes de retornar
+            _producer.Value.Flush(TimeSpan.FromSeconds(30));
+
+            return Task.FromResult<ICommandResult>(
+                new CommandResult((int)HttpStatusCode.OK));
+        }
+        catch (ProduceException<string, RetornoMovimentoContabil> ex)
+        {
+            _logger.LogError(ex,
+                "ProduceException ao publicar retorno. " +
+                "Codigo: {Codigo} Erro: {Erro}",
+                retorno.CodigoIdentificacaoMovimentacaoFinanceira,
+                ex.Error.Reason);
+
+            var commandResult = new CommandResult(
+                (int)HttpStatusCode.InternalServerError);
+            commandResult.AddNotification(
+                "RetornoMovimentoContabilService",
+                "Erro ao publicar retorno no Kafka.");
+
+            return Task.FromResult<ICommandResult>(commandResult);
+        }
+        catch (KafkaException ex)
+        {
+            _logger.LogError(ex,
+                "KafkaException ao publicar retorno. Erro: {Erro}",
+                ex.Error.Reason);
+
+            var commandResult = new CommandResult(
+                (int)HttpStatusCode.InternalServerError);
+            commandResult.AddNotification(
+                "RetornoMovimentoContabilService",
+                "Erro ao publicar retorno no Kafka.");
+
+            return Task.FromResult<ICommandResult>(commandResult);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Erro inesperado ao publicar retorno. " +
+                "Codigo: {Codigo}",
+                retorno.CodigoIdentificacaoMovimentacaoFinanceira);
+
+            var commandResult = new CommandResult(
+                (int)HttpStatusCode.InternalServerError);
+            commandResult.AddNotification(
+                "RetornoMovimentoContabilService",
+                "Erro inesperado ao publicar retorno.");
+
+            return Task.FromResult<ICommandResult>(commandResult);
+        }
+    }
+
+    private Message<string, RetornoMovimentoContabil> CriarMensagem(
+        Domain.Entities.RetornoMovimentoContabil retorno)
+        => new()
+        {
+            Key = retorno.CodigoIdentificacaoMovimentacaoFinanceira
+                ?? Guid.NewGuid().ToString(),
+            Value = CriarValue(retorno),
+            Headers = CriarHeaders(retorno),
+            Timestamp = new Timestamp(DateTimeOffset.UtcNow)
+        };
+
+    private Headers CriarHeaders(
+        Domain.Entities.RetornoMovimentoContabil retorno)
+        => new()
+        {
+            { "specversion", HeaderSpecversion },
+            { "type", HeaderType },
+            { "source", HeaderSource },
+            { "id", Encoding.UTF8.GetBytes(
+                retorno.CodigoIdentificacaoMovimentacaoFinanceira
+                ?? Guid.NewGuid().ToString()) },
+            { "correlationid", Encoding.UTF8.GetBytes(
+                Guid.NewGuid().ToString()) },
+            { "time", Encoding.UTF8.GetBytes(
+                DateTimeOffset.UtcNow.ToString(
+                    "yyyy-MM-ddTHH:mm:ss.fffffffzzz")) },
+            { "messageversion", HeaderMessageversion },
+            { "transactionid", Encoding.UTF8.GetBytes(
+                retorno.CodigoIdentificacaoMovimentacaoFinanceira
+                ?? Guid.NewGuid().ToString()) },
+            { "datacontenttype", HeaderDatacontenttype }
+        };
+
+    private static RetornoMovimentoContabilData CriarValue(
+        Domain.Entities.RetornoMovimentoContabil retorno)
+        => new()
+        {
+            data = new RetornoMovimentoContabilData
+            {
+                codigo_identificacao_movimentacao_financeira =
+                    retorno.CodigoIdentificacaoMovimentacaoFinanceira
+                    ?? string.Empty,
+                codigo_identificador_referencia_movimento =
+                    retorno.CodigoIdentificadorReferenciaMovimento
+                    ?? string.Empty,
+                codigo_status_movimento =
+                    retorno.CodigoStatusMovimento ?? string.Empty,
+                texto_mensagem =
+                    retorno.TextoMensagem ?? string.Empty
+            }
+        };
+
+    private TopicConfiguration? ObterConfiguracaoTopico()
+        => _cachedTopicConfiguration ??= _kafkaConfiguration
+            .ProducerConfiguration
+            .TopicConfigurations
+            .FirstOrDefault(x => x.Tipo == ETipoTopico.RetornoMovimentoContabil);
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+
+        if (_producer.IsValueCreated)
+        {
+            // ✅ Flush garante entrega de mensagens pendentes antes de encerrar
+            _producer.Value.Flush(TimeSpan.FromSeconds(10));
+            _producer.Value.Dispose();
+        }
+
+        _disposed = true;
+    }
+}
+
+Alteração 3 — MensagemProcessador.cs
+FX9.ProcessaMovimentoContabil.Application/UseCases/Processadores/MensagemProcessador.cs
+Substituir os métodos ProcessarAsync e PublicarRetornosSeExistir:
+csharppublic async Task ProcessarAsync(
+    ConsumeResult<string, RecebimentoMovimentoContabil> consumeResult,
+    CancellationToken cancellationToken)
+{
+    try
+    {
+        var retornosParaPublicar = new List<RetornoMovimentoContabil>();
+
+        // ✅ Lógica de negócio existente — não alterar
+        var resultado = await _handler.ProcessarMensagemIndividual(
+            consumeResult,
+            retornosParaPublicar,
+            cancellationToken);
+
+        // ✅ Verifica publicação antes de commitar
+        var publicacaoOk = await PublicarRetornoSeExistir(retornosParaPublicar);
+
+        if (!publicacaoOk)
+        {
+            _logger.LogWarning(
+                "Publicação do retorno falhou. " +
+                "Kafka irá reenviar. " +
+                "Offset: {Offset} Partição: {Particao}",
+                consumeResult.Offset,
+                consumeResult.Partition);
+            return;
+        }
+
+        if (DeveCommitar(resultado))
+            CommitarMensagem(consumeResult);
+        else
+            LogarErroSemCommit(consumeResult);
+    }
+    catch (Exception ex)
+    {
+        // Não commita — Kafka irá reenviar automaticamente
+        _logger.LogError(ex,
+            "Erro inesperado ao processar mensagem. " +
+            "Kafka irá reenviar automaticamente.");
+    }
+}
+
+private async Task<bool> PublicarRetornoSeExistir(
+    List<RetornoMovimentoContabil> retornosParaPublicar)
+{
+    if (!retornosParaPublicar.Any()) return true;
+
+    // Consumer sempre gera 1 retorno por mensagem
+    var retorno = retornosParaPublicar.Single();
+
+    var resultado = await _retornoMovimentoContabilService.Publicar(retorno);
+
+    if (!resultado.Success)
+    {
+        _logger.LogError(
+            "Falha ao publicar retorno. " +
+            "Mensagem não será commitada — Kafka irá reenviar.");
+        return false;
+    }
+
+    return true;
+}
+
+Alteração 4 — Verificar outros locais que chamam PublicarEmLote
+Buscar em todo o projeto por chamadas a PublicarEmLote e atualizar para Publicar:
+csharp// Antes
+await _retornoMovimentoContabilService.PublicarEmLote(retornosParaPublicar);
+
+// Depois
+await _retornoMovimentoContabilService.Publicar(retornosParaPublicar.Single());
+
+Testes unitários a ajustar
+RetornoMovimentoContabilService
+Teste 1 — Publica com sucesso
+csharp[Fact]
+public void Publicar_QuandoSucesso_DeveRetornarOk()
+{
+    // Arrange
+    var retorno = CriarRetornoFake();
+
+    _producerMock
+        .Setup(x => x.Produce(
+            It.IsAny<string>(),
+            It.IsAny<Message<string, RetornoMovimentoContabil>>(),
+            It.IsAny<Action<DeliveryReport<string, RetornoMovimentoContabil>>>()))
+        .Verifiable();
+
+    // Act
+    var resultado = _service.Publicar(retorno).Result;
+
+    // Assert
+    resultado.Success.Should().BeTrue();
+    _producerMock.Verify();
+}
+Teste 2 — Tópico não habilitado retorna BadRequest
+csharp[Fact]
+public void Publicar_QuandoTopicoNaoHabilitado_DeveRetornarBadRequest()
+{
+    // Arrange
+    ConfigurarTopico(enable: false);
+    var retorno = CriarRetornoFake();
+
+    // Act
+    var resultado = _service.Publicar(retorno).Result;
+
+    // Assert
+    resultado.StatusCode.Should().Be((int)HttpStatusCode.BadRequest);
+}
+Teste 3 — ProduceException retorna InternalServerError
+csharp[Fact]
+public void Publicar_QuandoProduceException_DeveRetornarInternalServerError()
+{
+    // Arrange
+    var retorno = CriarRetornoFake();
+
+    _producerMock
+        .Setup(x => x.Produce(
+            It.IsAny<string>(),
+            It.IsAny<Message<string, RetornoMovimentoContabil>>(),
+            It.IsAny<Action<DeliveryReport<string, RetornoMovimentoContabil>>>()))
+        .Throws(new ProduceException<string, RetornoMovimentoContabil>(
+            new Error(ErrorCode.BrokerNotAvailable),
+            new DeliveryResult<string, RetornoMovimentoContabil>()));
+
+    // Act
+    var resultado = _service.Publicar(retorno).Result;
+
+    // Assert
+    resultado.Success.Should().BeFalse();
+    resultado.StatusCode.Should().Be((int)HttpStatusCode.InternalServerError);
+}
+Teste 4 — Dispose faz Flush e libera producer
+csharp[Fact]
+public void Dispose_QuandoChamado_DeveFazFlushEDispose()
+{
+    // Act
+    _service.Dispose();
+
+    // Assert
+    _producerMock.Verify(x => x.Flush(It.IsAny<TimeSpan>()), Times.Once);
+    _producerMock.Verify(x => x.Dispose(), Times.Once);
+}
+MensagemProcessador
+Teste 1 — Publicação falha não commita
+csharp[Fact]
+public async Task ProcessarAsync_QuandoPublicacaoFalha_NaoDeveCommitar()
+{
+    // Arrange
+    var consumeResult = CriarConsumeResultFake();
+    ConfigurarHandlerComRetorno(HttpStatusCode.OK);
+
+    _retornoServiceMock
+        .Setup(x => x.Publicar(It.IsAny<RetornoMovimentoContabil>()))
+        .ReturnsAsync(new CommandResult((int)HttpStatusCode.InternalServerError));
+
+    // Act
+    await _processador.ProcessarAsync(consumeResult, CancellationToken.None);
+
+    // Assert
+    _kafkaConsumerChannelMock
+        .Verify(x => x.CommitarMensagem(It.IsAny<ConsumeResult<string,
+            RecebimentoMovimentoContabil>>()), Times.Never);
+}
+Teste 2 — Publicação sucesso commita
+csharp[Fact]
+public async Task ProcessarAsync_QuandoPublicacaoSucesso_DeveCommitar()
+{
+    // Arrange
+    var consumeResult = CriarConsumeResultFake();
+    ConfigurarHandlerComRetorno(HttpStatusCode.OK);
+
+    _retornoServiceMock
+        .Setup(x => x.Publicar(It.IsAny<RetornoMovimentoContabil>()))
+        .ReturnsAsync(new CommandResult((int)HttpStatusCode.OK));
+
+    // Act
+    await _processador.ProcessarAsync(consumeResult, CancellationToken.None);
+
+    // Assert
+    _kafkaConsumerChannelMock
+        .Verify(x => x.CommitarMensagem(consumeResult), Times.Once);
+}
+Teste 3 — Sem retornos commita sem publicar
+csharp[Fact]
+public async Task ProcessarAsync_QuandoSemRetornos_DeveCommitarSemPublicar()
+{
+    // Arrange
+    var consumeResult = CriarConsumeResultFake();
+    ConfigurarHandlerSemRetorno(HttpStatusCode.OK);
+
+    // Act
+    await _processador.ProcessarAsync(consumeResult, CancellationToken.None);
+
+    // Assert
+    _retornoServiceMock
+        .Verify(x => x.Publicar(It.IsAny<RetornoMovimentoContabil>()),
+            Times.Never);
+
+    _kafkaConsumerChannelMock
+        .Verify(x => x.CommitarMensagem(consumeResult), Times.Once);
+}
+
+Resumo das mudanças
+AntesDepoisPublicarEmLote(List<> retornos)Publicar(RetornoMovimentoContabil retorno)Parallel.ForEachremovido — 1 itemConcurrentBagremovido — 1 itemTask.FromResult desnecessáriosimplificado_cachedProducer ??=Lazy<T> thread-safeHeaders recalculados por msgHeaders estáticos 1xPublicarRetornosSeExistir (lista)PublicarRetornoSeExistir (1 item)
+
+Checklist final
+
+ Interface atualizada — só Publicar(RetornoMovimentoContabil retorno)
+ RetornoMovimentoContabilService reescrito completo
+ Lazy<T> para producer thread-safe
+ Produce + Flush sequencial
+ Headers estáticos calculados uma vez
+ Dispose com Flush garantido
+ MensagemProcessador usando Publicar com item único
+ PublicarRetornoSeExistir recebe lista e pega .Single()
+ Todos os locais que chamavam PublicarEmLote atualizados
+ Testes do service atualizados
+ Testes do processador atualizados
+ Todos os testes passando
+ Projeto compila sem erros
+ Nenhuma lógica de negócio alteradaTODOS os ambientes
