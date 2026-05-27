@@ -1,22 +1,28 @@
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  KafkaProducer - RecebimentoMovimentoContabil                           ║
+// ║                                                                          ║
+// ║  Dependências (adicionar ao .csproj):                                   ║
+// ║    <PackageReference Include="Confluent.Kafka" Version="2.4.0" />       ║
+// ║    <PackageReference Include="Confluent.SchemaRegistry" Version="2.4.0" />
+// ║    <PackageReference Include="Confluent.SchemaRegistry.Serdes.Avro" Version="2.4.0" />
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
 using Confluent.Kafka;
 using Confluent.SchemaRegistry;
 using Confluent.SchemaRegistry.Serdes;
-using KafkaProducer.Configuration;
-using KafkaProducer.Models;
-using Microsoft.Extensions.Configuration;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
-// ─── Configuração ───────────────────────────────────────────────────────────
-var config = new ConfigurationBuilder()
-    .SetBasePath(AppContext.BaseDirectory)
-    .AddJsonFile("appsettings.json", optional: false)
-    .Build();
+// ─── Configurações ────────────────────────────────────────────────────────────
+const string BROKER_URL        = "kafka-events.dev.aws.cloud.ihf:31101";
+const string CLIENT_ID         = "fx9_client_id_emt_ret_movimento_contabil_dev";
+const string TOPIC             = "emprestimos-e-financiamentos-recebimentos-movimento-contabil";
+const string SCHEMA_REGISTRY   = "https://schema-registry.dev.aws.cloud.ihf:8082";
+const string CA_CERT           = "./certs/caroot.crt";
+const string P12_LOCATION      = "./certs/FX90008.p12";
+const string P12_PASSWORD      = ""; // preencha se necessário
 
-var kafkaSettings    = config.GetSection("KafkaConfiguration").Get<KafkaSettings>()!;
-var schemaSettings   = config.GetSection("SchemaRegistryConfiguration").Get<SchemaRegistrySettings>()!;
-var producerSettings = config.GetSection("ProducerConfiguration").Get<ProducerSettings>()!;
-
-// ─── Banner ──────────────────────────────────────────────────────────────────
+// ─── Banner ───────────────────────────────────────────────────────────────────
 Console.ForegroundColor = ConsoleColor.Cyan;
 Console.WriteLine(@"
   ██╗  ██╗ █████╗ ███████╗██╗  ██╗ █████╗
@@ -29,39 +35,39 @@ Console.WriteLine(@"
 ");
 Console.ResetColor();
 
-Log($"Broker       : {producerSettings.BrokerUrl}");
-Log($"Tópico       : {producerSettings.TopicName}");
-Log($"Schema Reg.  : {schemaSettings.Url}");
-Log($"ClientId     : {producerSettings.ClientId}");
-Log($"Certificado  : {kafkaSettings.P12Location}");
+Log($"Broker      : {BROKER_URL}");
+Log($"Tópico      : {TOPIC}");
+Log($"Schema Reg. : {SCHEMA_REGISTRY}");
+Log($"ClientId    : {CLIENT_ID}");
+Log($"Cert P12    : {P12_LOCATION}");
 Console.WriteLine();
 
-// ─── Schema Registry ────────────────────────────────────────────────────────
+// ─── Schema Registry ──────────────────────────────────────────────────────────
 var schemaRegistryConfig = new SchemaRegistryConfig
 {
-    Url                         = schemaSettings.Url,
-    RequestTimeoutMs            = schemaSettings.RequestTimeoutMs,
-    MaxCachedSchemas            = schemaSettings.MaxCachedSchemas,
-    EnableSslCertificateVerification = schemaSettings.EnableSslCertificateVerification,
-};
-
-// ─── Producer Config ─────────────────────────────────────────────────────────
-var producerConfig = new ProducerConfig
-{
-    BootstrapServers            = producerSettings.BrokerUrl,
-    ClientId                    = producerSettings.ClientId,
-    CompressionType             = CompressionType.Gzip,
-    BatchNumMessages            = producerSettings.BatchNumMessages,
-    LingerMs                    = producerSettings.LingerMs,
-    Acks                        = Acks.All,
-    SecurityProtocol            = SecurityProtocol.Ssl,
-    SslCaLocation               = kafkaSettings.CaCertLocation,
-    SslKeystoreLocation         = kafkaSettings.P12Location,
-    SslKeystorePassword         = kafkaSettings.P12Password,
+    Url                              = SCHEMA_REGISTRY,
+    RequestTimeoutMs                 = 5000,
+    MaxCachedSchemas                 = 10,
     EnableSslCertificateVerification = false,
 };
 
-// ─── Loop Principal ──────────────────────────────────────────────────────────
+// ─── Producer Config ──────────────────────────────────────────────────────────
+var producerConfig = new ProducerConfig
+{
+    BootstrapServers                 = BROKER_URL,
+    ClientId                         = CLIENT_ID,
+    CompressionType                  = CompressionType.Gzip,
+    BatchNumMessages                 = 100,
+    LingerMs                         = 5,
+    Acks                             = Acks.All,
+    SecurityProtocol                 = SecurityProtocol.Ssl,
+    SslCaLocation                    = CA_CERT,
+    SslKeystoreLocation              = P12_LOCATION,
+    SslKeystorePassword              = P12_PASSWORD,
+    EnableSslCertificateVerification = false,
+};
+
+// ─── Loop Principal ───────────────────────────────────────────────────────────
 using var schemaRegistry = new CachedSchemaRegistryClient(schemaRegistryConfig);
 
 var avroSerializerConfig = new AvroSerializerConfig
@@ -94,22 +100,18 @@ while (true)
     switch (opcao)
     {
         case "1":
-            await EnviarMensagemExemplo(producer, producerSettings.TopicName);
+            await EnviarExemplo(producer);
             break;
-
         case "2":
-            await EnviarMensagemCustomizada(producer, producerSettings.TopicName);
+            await EnviarCustomizado(producer);
             break;
-
         case "3":
-            await EnviarEmLote(producer, producerSettings.TopicName);
+            await EnviarLote(producer);
             break;
-
         case "Q":
-            LogSuccess("Encerrando producer...");
+            LogSuccess("Encerrando e fazendo flush...");
             producer.Flush(TimeSpan.FromSeconds(10));
             return;
-
         default:
             LogError("Opção inválida.");
             break;
@@ -118,32 +120,24 @@ while (true)
     Console.WriteLine();
 }
 
-// ─── Funções ─────────────────────────────────────────────────────────────────
-
-async Task EnviarMensagemExemplo(IProducer<string, RecebimentoMovimentoContabil> prod, string topic)
+// ─── Envio de exemplo ─────────────────────────────────────────────────────────
+async Task EnviarExemplo(IProducer<string, RecebimentoMovimentoContabil> prod, int seq = 1)
 {
-    var mensagem = CriarMensagemExemplo();
-    var key      = mensagem.data.codigo_identificacao_movimentacao_financeira;
-
+    var msg = MensagemExemplo(seq);
+    var key = msg.data.codigo_identificacao_movimentacao_financeira;
     try
     {
-        Log($"Publicando mensagem com key: {key}");
-        var result = await prod.ProduceAsync(topic, new Message<string, RecebimentoMovimentoContabil>
-        {
-            Key   = key,
-            Value = mensagem
-        });
-        LogSuccess($"✔ Publicado → Partition: {result.Partition.Value} | Offset: {result.Offset.Value}");
+        Log($"Publicando → key: {key}");
+        var r = await prod.ProduceAsync(TOPIC, new Message<string, RecebimentoMovimentoContabil> { Key = key, Value = msg });
+        LogSuccess($"✔ Partition: {r.Partition.Value} | Offset: {r.Offset.Value}");
     }
-    catch (Exception ex)
-    {
-        LogError($"Erro ao publicar: {ex.Message}");
-    }
+    catch (Exception ex) { LogError(ex.Message); }
 }
 
-async Task EnviarMensagemCustomizada(IProducer<string, RecebimentoMovimentoContabil> prod, string topic)
+// ─── Envio customizado via JSON ───────────────────────────────────────────────
+async Task EnviarCustomizado(IProducer<string, RecebimentoMovimentoContabil> prod)
 {
-    Console.WriteLine("Cole o JSON da mensagem (RecebimentoMovimentoContabilData) e pressione Enter duas vezes:");
+    Console.WriteLine("Cole o JSON (campo 'data') e pressione Enter duas vezes:");
     var sb = new System.Text.StringBuilder();
     string? line;
     while (!string.IsNullOrWhiteSpace(line = Console.ReadLine()))
@@ -151,66 +145,44 @@ async Task EnviarMensagemCustomizada(IProducer<string, RecebimentoMovimentoConta
 
     try
     {
-        var data     = JsonSerializer.Deserialize<RecebimentoMovimentoContabilData>(sb.ToString())!;
-        var mensagem = new RecebimentoMovimentoContabil { data = data };
-        var key      = data.codigo_identificacao_movimentacao_financeira;
+        var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var data = JsonSerializer.Deserialize<RecebimentoMovimentoContabilData>(sb.ToString(), opts)!;
+        var msg  = new RecebimentoMovimentoContabil { data = data };
+        var key  = data.codigo_identificacao_movimentacao_financeira;
 
-        var result = await prod.ProduceAsync(topic, new Message<string, RecebimentoMovimentoContabil>
-        {
-            Key   = key,
-            Value = mensagem
-        });
-        LogSuccess($"✔ Publicado → Partition: {result.Partition.Value} | Offset: {result.Offset.Value}");
+        var r = await prod.ProduceAsync(TOPIC, new Message<string, RecebimentoMovimentoContabil> { Key = key, Value = msg });
+        LogSuccess($"✔ Partition: {r.Partition.Value} | Offset: {r.Offset.Value}");
     }
-    catch (JsonException jex)
-    {
-        LogError($"JSON inválido: {jex.Message}");
-    }
-    catch (Exception ex)
-    {
-        LogError($"Erro ao publicar: {ex.Message}");
-    }
+    catch (JsonException jex) { LogError($"JSON inválido: {jex.Message}"); }
+    catch (Exception ex)      { LogError(ex.Message); }
 }
 
-async Task EnviarEmLote(IProducer<string, RecebimentoMovimentoContabil> prod, string topic)
+// ─── Envio em lote ────────────────────────────────────────────────────────────
+async Task EnviarLote(IProducer<string, RecebimentoMovimentoContabil> prod)
 {
-    Console.Write("Quantas mensagens enviar? ");
-    if (!int.TryParse(Console.ReadLine(), out var qtd) || qtd <= 0)
+    Console.Write("Quantas mensagens? ");
+    if (!int.TryParse(Console.ReadLine(), out var qtd) || qtd <= 0) { LogError("Quantidade inválida."); return; }
+
+    Log($"Enviando {qtd} mensagens...");
+    var tasks = Enumerable.Range(1, qtd).Select(i =>
     {
-        LogError("Quantidade inválida.");
-        return;
-    }
-
-    Log($"Enviando {qtd} mensagens em lote...");
-    var tasks = new List<Task<DeliveryResult<string, RecebimentoMovimentoContabil>>>();
-
-    for (int i = 1; i <= qtd; i++)
-    {
-        var mensagem = CriarMensagemExemplo(i);
-        var key      = mensagem.data.codigo_identificacao_movimentacao_financeira;
-
-        tasks.Add(prod.ProduceAsync(topic, new Message<string, RecebimentoMovimentoContabil>
-        {
-            Key   = key,
-            Value = mensagem
-        }));
-    }
+        var msg = MensagemExemplo(i);
+        return prod.ProduceAsync(TOPIC, new Message<string, RecebimentoMovimentoContabil>
+            { Key = msg.data.codigo_identificacao_movimentacao_financeira, Value = msg });
+    }).ToList();
 
     try
     {
         var results = await Task.WhenAll(tasks);
-        LogSuccess($"✔ {results.Length} mensagens publicadas com sucesso.");
-
+        LogSuccess($"✔ {results.Length} mensagens publicadas.");
         foreach (var r in results)
             Console.WriteLine($"   → Key: {r.Key} | Partition: {r.Partition.Value} | Offset: {r.Offset.Value}");
     }
-    catch (Exception ex)
-    {
-        LogError($"Erro no lote: {ex.Message}");
-    }
+    catch (Exception ex) { LogError(ex.Message); }
 }
 
-RecebimentoMovimentoContabil CriarMensagemExemplo(int seq = 1) => new()
+// ─── Mensagem de exemplo ──────────────────────────────────────────────────────
+RecebimentoMovimentoContabil MensagemExemplo(int seq = 1) => new()
 {
     data = new RecebimentoMovimentoContabilData
     {
@@ -230,10 +202,7 @@ RecebimentoMovimentoContabil CriarMensagemExemplo(int seq = 1) => new()
         numero_sequencial_versao                    = seq,
         numero_contrato                             = 9876543210L + seq,
         data_hora_venda                             = DateTime.Now.AddDays(-30).ToString("yyyy-MM-ddTHH:mm:ss"),
-        data_contemplacao_consorcio                 = null,
-        data_entrega_bem_consorcio                  = null,
         codigo_situacao_cobranca                    = "A",
-        data_cancelamento_cota                      = null,
         codigo_situacao_grupo                       = "A",
         codigo_tipo_empresa_origem                  = "341",
         codigo_empresa_origem                       = "0001",
@@ -241,50 +210,84 @@ RecebimentoMovimentoContabil CriarMensagemExemplo(int seq = 1) => new()
         codigo_tipo_empresa_destino                 = "341",
         codigo_empresa_destino                      = "0002",
         codigo_dependencia_destino                  = "0002",
-        indicador_status_estorno                    = null,
         sigla_sistema_evento                        = "CONS",
         numero_parcela_contrato                     = 1,
         numero_prazo_cota                           = 60,
         data_vencimento_parcela_contrato            = DateTime.Now.AddMonths(1).ToString("yyyy-MM-dd"),
         data_contabil_transacao                     = DateTime.Now.ToString("yyyy-MM-dd"),
-        indicador_tributacao_imposto                = null,
         valor_fundo_comum                           = 1500.00,
         valor_fundo_reserva                         = 150.00,
         valor_taxa_administracao_paga               = 75.00,
         valor_seguro_pagar                          = 30.00,
-        valor_multa_juro_pagar                      = null,
-        valor_multa_juro_administradora             = null,
-        valor_outro                                 = null,
         valor_total_grupo                           = 5000.00,
-        valor_total_demais_parcela                  = null,
         valor_total_lancamento                      = 1755.00,
-        valor_total_tributacao                      = null,
-        indicador_tarifa_movimento                  = null,
         data_operacao_origem                        = DateTime.Now.ToString("yyyy-MM-dd"),
-        codigo_tipo_motivo_estorno                  = null,
-        codigo_unico_transacao_origem               = null,
         codigo_sistema_integrador                   = "FX9",
-        indicador_grupo_antes_lei                   = null
     }
 };
 
-void Log(string msg)
+// ─── Helpers de log ───────────────────────────────────────────────────────────
+void Log(string msg)        { Console.ForegroundColor = ConsoleColor.Gray;  Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {msg}");    Console.ResetColor(); }
+void LogSuccess(string msg) { Console.ForegroundColor = ConsoleColor.Green; Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {msg}");    Console.ResetColor(); }
+void LogError(string msg)   { Console.ForegroundColor = ConsoleColor.Red;   Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✖ {msg}"); Console.ResetColor(); }
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+public class RecebimentoMovimentoContabil
 {
-    Console.ForegroundColor = ConsoleColor.Gray;
-    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {msg}");
-    Console.ResetColor();
+    public RecebimentoMovimentoContabilData data { get; set; } = new();
 }
 
-void LogSuccess(string msg)
+public class RecebimentoMovimentoContabilData
 {
-    Console.ForegroundColor = ConsoleColor.Green;
-    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {msg}");
-    Console.ResetColor();
-}
-
-void LogError(string msg)
-{
-    Console.ForegroundColor = ConsoleColor.Red;
-    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] ✖ {msg}");
-    Console.ResetColor();
+    public string  codigo_identificacao_movimentacao_financeira { get; set; } = string.Empty;
+    public string  codigo_pessoa_corporativo                    { get; set; } = string.Empty;
+    public string  codigo_tipo_pessoa_titular_recebivel         { get; set; } = string.Empty;
+    public string  numero_centro_custo_debito                   { get; set; } = string.Empty;
+    public string  numero_centro_custo_credito                  { get; set; } = string.Empty;
+    public string  codigo_identificador_referencia_movimento    { get; set; } = string.Empty;
+    public int     codigo_produto_operacional                   { get; set; }
+    public long    identificador_evento_negocio                 { get; set; }
+    public int     codigo_empresa                               { get; set; }
+    public double? identificador_grupo                          { get; set; }
+    public double? numero_identificador_cota_cliente            { get; set; }
+    public string  numero_grupo_bem_produto_consorcio           { get; set; } = string.Empty;
+    public int     numero_cota_consorcio                        { get; set; }
+    public int     numero_sequencial_versao                     { get; set; }
+    public long    numero_contrato                              { get; set; }
+    public string? data_hora_venda                              { get; set; }
+    public string? data_contemplacao_consorcio                  { get; set; }
+    public string? data_entrega_bem_consorcio                   { get; set; }
+    public string? codigo_situacao_cobranca                     { get; set; }
+    public string? data_cancelamento_cota                       { get; set; }
+    public string? codigo_situacao_grupo                        { get; set; }
+    public string  codigo_tipo_empresa_origem                   { get; set; } = string.Empty;
+    public string  codigo_empresa_origem                        { get; set; } = string.Empty;
+    public string  codigo_dependencia_origem                    { get; set; } = string.Empty;
+    public string  codigo_tipo_empresa_destino                  { get; set; } = string.Empty;
+    public string  codigo_empresa_destino                       { get; set; } = string.Empty;
+    public string  codigo_dependencia_destino                   { get; set; } = string.Empty;
+    public string? indicador_status_estorno                     { get; set; }
+    public string  sigla_sistema_evento                         { get; set; } = string.Empty;
+    public int?    numero_parcela_contrato                      { get; set; }
+    public int?    numero_prazo_cota                            { get; set; }
+    public string? data_vencimento_parcela_contrato             { get; set; }
+    public string  data_contabil_transacao                      { get; set; } = string.Empty;
+    public string? indicador_tributacao_imposto                 { get; set; }
+    public double? valor_fundo_comum                            { get; set; }
+    public double? valor_fundo_reserva                          { get; set; }
+    public double? valor_taxa_administracao_paga                { get; set; }
+    public double? valor_seguro_pagar                           { get; set; }
+    public double? valor_multa_juro_pagar                       { get; set; }
+    public double? valor_multa_juro_administradora              { get; set; }
+    public double? valor_outro                                  { get; set; }
+    public double? valor_total_grupo                            { get; set; }
+    public double? valor_total_demais_parcela                   { get; set; }
+    public double  valor_total_lancamento                       { get; set; }
+    public double? valor_total_tributacao                       { get; set; }
+    public string? indicador_tarifa_movimento                   { get; set; }
+    public string? data_operacao_origem                         { get; set; }
+    public string? codigo_tipo_motivo_estorno                   { get; set; }
+    public string? codigo_unico_transacao_origem                { get; set; }
+    public string  codigo_sistema_integrador                    { get; set; } = string.Empty;
+    public string? indicador_grupo_antes_lei                    { get; set; }
 }
