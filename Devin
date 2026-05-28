@@ -1,48 +1,73 @@
-Título: Fix: Logs do Serilog sendo descartados silenciosamente no Datadog
-
+Título: Feat: Criar LogMovimentoContext para enriquecer logs com contexto do fluxo
 Contexto:
-Worker service em .NET 8 com Serilog + Datadog sink. Os logs não estão aparecendo de forma completa/sequencial no Datadog — apenas alguns logs chegam, outros são silenciosamente descartados.
-Root cause identificado:
+Worker service FX9.ProcessaMovimentoContabil em .NET 8 com Serilog. Os logs chegam no Datadog sem contexto suficiente para rastreabilidade. O objetivo é que todo log do fluxo de processamento contenha automaticamente o CodigoIdentificacaoMovimentacaoFinanceira e outras propriedades chave, sem precisar passar manualmente em cada chamada de log.
+Referência de implementação:
+Baseado no padrão já usado no projeto UA2.Consorcio com a classe LogLoteContext.
 
-Pacote Serilog.Sinks.Datadog.Logs está na versão 0.5.2, que possui bug de flush/batch no .NET 8
-O WriteTo.DatadogLogs(...) no Program.cs está sem parâmetros de batch configurados (batchSizeLimit, batchPeriod, queueLimit), causando descarte silencioso de logs sob carga
+Tarefa 1 — Criar a classe LogMovimentoContext.cs em FX9.ProcessaMovimentoContabil.Infra.Logging:
+csharpusing Serilog.Context;
 
-
-Tarefas:
-
-Atualizar o pacote no arquivo .csproj do Worker:
-
-xml<!-- De -->
-<PackageReference Include="Serilog.Sinks.Datadog.Logs" Version="0.5.2" />
-<!-- Para -->
-<PackageReference Include="Serilog.Sinks.Datadog.Logs" Version="0.6.0" />
-
-Atualizar o Program.cs adicionando os parâmetros de batch no WriteTo.DatadogLogs(...):
-
-csharploggerConfig = loggerConfig.WriteTo.DatadogLogs(
-    apiKey: ddApiKey,
-    service: "fx9-plataformacontabil-workerprocmovcontabil",
-    source: "csharp",
-    host: Environment.MachineName,
-    tags: new[]
+namespace FX9.ProcessaMovimentoContabil.Infra.Logging
+{
+    public sealed class LogMovimentoContext : IDisposable
     {
-        "env:" + (Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "development"),
-        "squad:S003619",
-        "diretoria:DIR-CIO",
-        "community:C0046"
-    },
-    batchSizeLimit: 100,
-    batchPeriod: TimeSpan.FromSeconds(2),
-    queueLimit: 10000
+        private readonly IDisposable _codigoIdentificacao;
+        private readonly IDisposable _codigoEmpresa;
+        private readonly IDisposable _codigoReferencia;
+        private readonly IDisposable _dataProcessamento;
+
+        public LogMovimentoContext(
+            string codigoIdentificacaoMovimentacaoFinanceira,
+            string codigoEmpresa,
+            string codigoIdentificadorReferenciaMovimento,
+            DateTime? dataProcessamento = null)
+        {
+            _codigoIdentificacao = LogContext.PushProperty(
+                "CodigoIdentificacaoMovimentacaoFinanceira", 
+                codigoIdentificacaoMovimentacaoFinanceira);
+            _codigoEmpresa       = LogContext.PushProperty("CodigoEmpresa", codigoEmpresa);
+            _codigoReferencia    = LogContext.PushProperty(
+                "CodigoIdentificadorReferenciaMovimento", 
+                codigoIdentificadorReferenciaMovimento);
+            _dataProcessamento   = LogContext.PushProperty(
+                "DataProcessamento", 
+                (dataProcessamento ?? DateTime.UtcNow).ToString("o"));
+        }
+
+        public void Dispose()
+        {
+            _codigoIdentificacao.Dispose();
+            _codigoEmpresa.Dispose();
+            _codigoReferencia.Dispose();
+            _dataProcessamento.Dispose();
+        }
+    }
+}
+
+Tarefa 2 — Usar o LogMovimentoContext no ProcessarMovimentoContabilWorkerHandler.cs, envolvendo todo o fluxo do método Handle:
+csharppublic async Task<ICommandResult> Handle(...)
+{
+    var movimento = RecebimentoMovimentoContabil.MapearParaEntidade(recebimentoResult);
+
+    using var logCtx = new LogMovimentoContext(
+        movimento.CodigoIdentificacaoMovimentacaoFinanceira,
+        movimento.CodigoEmpresa,
+        movimento.CodigoIdentificadorReferenciaMovimento
+    );
+
+    // todo o restante do método — todos os logs ganham o contexto automaticamente
+}
+
+Tarefa 3 — Usar o LogMovimentoContext no MovimentoContabilRepository.cs, no método InserirMovimentoContabilAsync:
+csharpusing var logCtx = new LogMovimentoContext(
+    movimentoContabil.CodigoIdentificacaoMovimentacaoFinanceira,
+    movimentoContabil.CodigoEmpresa,
+    movimentoContabil.CodigoIdentificadorReferenciaMovimento
 );
-
-Verificar se há outros projetos na solution usando o mesmo pacote na versão 0.5.2 e atualizar também.
-Garantir que o build continua passando sem erros após as alterações.
-
 
 Critério de aceite:
 
-Pacote atualizado para 0.6.0
-Parâmetros de batch configurados explicitamente
-Build sem erros
-Nenhuma outra alteração de comportamento
+Classe LogMovimentoContext criada em Infra.Logging
+Usada no handler e no repository
+Todos os logs do fluxo passam a ter CodigoIdentificacaoMovimentacaoFinanceira, CodigoEmpresa, CodigoIdentificadorReferenciaMovimento e DataProcessamento automaticamente no Datadog
+Build sem erros, sem quebrar testes existentes
