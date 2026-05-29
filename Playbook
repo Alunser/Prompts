@@ -1,51 +1,49 @@
-## Overview
+using Itau.IKafka;
 
-Implementar o padrão de log estruturado para o Datadog em todas as classes do projeto `UA2.Consorcio.Worker`. O objetivo é garantir rastreabilidade completa de um lote entre diferentes serviços usando o `IdLote` como chave principal no Datadog Log Explorer.
+// — Configurações —
+const string BROKER_URL  = "kafka-events.dev.aws.cloud.ihf:31101";
+const string TOPIC       = "emprestimos-e-financiamentos-recebimentos-movimento-contabil";
+const string CLIENT_ID   = "fx9_client_id_emt_ret_movimento_contabil_dev";
+const string CLIENT_USER = "FX90008";
+const string CLIENT_PASS = "gAAAAABj4T0as5aDHA5gqKnmjJf7EvC9G4x-_xq6oCARgh0otNKg3SHWpaXsTdm2QAiZVrFH1j1WPeHVengawdSQp8x7fr8FYQ==";
 
-## Procedure
+const string CA_CERT      = "./certs/caroot.crt";
+const string P12_LOCATION = "./certs/FX90008.p12";
+const string P12_PASSWORD = "tj3hm@*NrLG+SJp";
 
-1. **Instalar pacotes**: Adicionar os pacotes abaixo ao projeto `UA2.Consorcio.Worker`:
-   - `Serilog.AspNetCore`
-   - `Serilog.Sinks.Datadog.Logs`
-   - `Serilog.Enrichers.Environment`
-   - `Serilog.Enrichers.Thread`
+const string KAAS_APP_NAME   = "Worker Processar Movimento Contabil";
+const string KAAS_COMMUNITY  = "CONSORCIO";
+const string KAAS_SIGLA      = "FX9";
+const string KAAS_ENVIRONMENT = "Development";
 
-2. **Criar o `LoteLogContext.cs`**: Criar o arquivo em `4.Infra/UA2.Consorcio.Infra/Logging/LoteLogContext.cs` usando o arquivo de referência fornecido. Essa classe injeta automaticamente os campos `IdLote`, `DataBatch`, `DataProcessamento`, `Origem` e `TotalRegistros` em todos os logs do bloco `using` via `LogContext.PushProperty` do Serilog — sem precisar repetir em cada chamada de log.
+var factory = new KafkaProducerFactory(
+    brokerUrl:       BROKER_URL,
+    clientId:        CLIENT_ID,
+    clientUser:      CLIENT_USER,
+    clientPassword:  CLIENT_PASS,
+    caCertLocation:  CA_CERT,
+    p12Location:     P12_LOCATION,
+    p12Password:     P12_PASSWORD,
+    appName:         KAAS_APP_NAME,
+    community:       KAAS_COMMUNITY,
+    sigla:           KAAS_SIGLA,
+    environment:     KAAS_ENVIRONMENT
+);
 
-3. **Substituir o `Program.cs`**: Usar o arquivo de referência fornecido. O ponto crítico é o `.Enrich.FromLogContext()` que é obrigatório para o `LoteLogContext` funcionar, e o `.UseSerilog()` no `CreateHostBuilder` que substitui o `ILogger` padrão do .NET pelo Serilog. A `DD_API_KEY` deve vir de variável de ambiente — nunca hardcoded.
+var producer = factory.CreateProducer<string>();
 
-4. **Substituir `IAppLogger<T>` por `ILogger<T>`**: Em todas as classes que hoje injetam `IAppLogger<T>`, substituir por `ILogger<T>` do namespace `Microsoft.Extensions.Logging`. Remover também o registro do `IAppLogger` no `Startup.cs` — o `ILogger<T>` já é registrado automaticamente pelo Serilog via `.UseSerilog()`.
+var mensagem = new KafkaMessage<string>
+{
+    Key   = Guid.NewGuid().ToString(),
+    Value = """{ "teste": "hello kafka" }"""
+};
 
-5. **Remover todos os logs antigos**: Remover TODOS os usos de `_logger.Info(...)`, `_logger.Warning(...)`, `_logger.Error(...)`, `_logger.Critical(...)`, `_logger.ProcessStart(...)` e `_logger.ProcessEnd(...)` e substituir pelos equivalentes do `ILogger<T>`: `LogInformation`, `LogWarning`, `LogError`, `LogCritical`.
-
-6. **Adicionar o `LoteLogContext` nos fluxos de lote**: Abrir um `LoteLogContext` no início de cada método que processa um lote, conforme a tabela abaixo:
-
-   | Classe | Origem |
-   |---|---|
-   | `ContabilizacoesController` | `"API"` |
-   | Handlers chamados via controller | `"API"` |
-   | `ContabilizacoesNewconWorker` e seus Handlers | `"WORKER"` |
-   | Funções Lambda (Python) | `"LAMBDA"` |
-
-   Quando o processamento for disparado via `Task.Run`, reabrir o `LoteLogContext` dentro da Task — o `LogContext` do Serilog é `AsyncLocal` e não propaga automaticamente para novas Tasks.
-
-7. **Seguir o catálogo de eventos**: O campo `Evento` deve usar APENAS os valores abaixo. A mensagem sempre inicia com o valor do Evento no formato: `"EVENTO | Fluxo=NomeDoFluxo | Campo={Campo}"`.
-
-   | Evento | Nível |
-   |---|---|
-   | `LOTE_INICIADO` | Information |
-   | `CONSULTA_REALIZADA` | Information |
-   | `KAFKA_PUBLICADO` | Information |
-   | `LOTE_CONCLUIDO` | Information |
-   | `WORKER_INICIADO` | Information |
-   | `WORKER_AGUARDANDO` | Information |
-   | `RETRY_TENTATIVA` | Warning |
-   | `RECONEXAO_KAFKA` | Warning |
-   | `FALHA_PARCIAL` | Error |
-   | `FALHA_SERIALIZACAO` | Error |
-   | `FALHA_DEPENDENCIA` | Error |
-   | `LOTE_ABORTADO` | Critical |
-
-8. **Não alterar**: Lógica de negócio, repositórios, services, configurações do Kafka, Commands, CommandResults e DTOs. Nos testes unitários, apenas atualizar mocks de `IAppLogger` para `ILogger<T>`.
-
-9. **Antes de prosseguir com a implementação e ajustes, sempre gere um arquivo para que eu possa revisar as alterações propostas. Só após eu dar o ok, pode seguir com a implementação.**
+try
+{
+    var result = await producer.ProduceAsync(TOPIC, mensagem);
+    Console.WriteLine($"✅ Publicado! Offset: {result.Offset} | Partition: {result.Partition}");
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"❌ Erro: {ex.Message}");
+}
