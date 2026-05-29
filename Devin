@@ -1,73 +1,80 @@
-Título: Feat: Criar LogMovimentoContext para enriquecer logs com contexto do fluxo
-Contexto:
-Worker service FX9.ProcessaMovimentoContabil em .NET 8 com Serilog. Os logs chegam no Datadog sem contexto suficiente para rastreabilidade. O objetivo é que todo log do fluxo de processamento contenha automaticamente o CodigoIdentificacaoMovimentacaoFinanceira e outras propriedades chave, sem precisar passar manualmente em cada chamada de log.
-Referência de implementação:
-Baseado no padrão já usado no projeto UA2.Consorcio com a classe LogLoteContext.
-
-Tarefa 1 — Criar a classe LogMovimentoContext.cs em FX9.ProcessaMovimentoContabil.Infra.Logging:
-csharpusing Serilog.Context;
-
-namespace FX9.ProcessaMovimentoContabil.Infra.Logging
+// ------ Publicar no Tópico ------
+try
 {
-    public sealed class LogMovimentoContext : IDisposable
+    using var schemaRegistryClient = new CachedSchemaRegistryClient(schemaRegistryConfig);
+    using var producer = new ProducerBuilder<string, RecebimentoMovimentoContabil>(producerConfig)
+        .SetValueSerializer(new AvroSerializer<RecebimentoMovimentoContabil>(schemaRegistryClient))
+        .Build();
+
+    var movimento = new RecebimentoMovimentoContabil
     {
-        private readonly IDisposable _codigoIdentificacao;
-        private readonly IDisposable _codigoEmpresa;
-        private readonly IDisposable _codigoReferencia;
-        private readonly IDisposable _dataProcessamento;
-
-        public LogMovimentoContext(
-            string codigoIdentificacaoMovimentacaoFinanceira,
-            string codigoEmpresa,
-            string codigoIdentificadorReferenciaMovimento,
-            DateTime? dataProcessamento = null)
+        data = new RecebimentoMovimentoContabilData
         {
-            _codigoIdentificacao = LogContext.PushProperty(
-                "CodigoIdentificacaoMovimentacaoFinanceira", 
-                codigoIdentificacaoMovimentacaoFinanceira);
-            _codigoEmpresa       = LogContext.PushProperty("CodigoEmpresa", codigoEmpresa);
-            _codigoReferencia    = LogContext.PushProperty(
-                "CodigoIdentificadorReferenciaMovimento", 
-                codigoIdentificadorReferenciaMovimento);
-            _dataProcessamento   = LogContext.PushProperty(
-                "DataProcessamento", 
-                (dataProcessamento ?? DateTime.UtcNow).ToString("o"));
+            codigo_identificacao_movimentacao_financeira = Guid.NewGuid().ToString(),
+            codigo_pessoa_corporativo = "123456",
+            codigo_tipo_pessoa_titular_recebivel = "PF",
+            numero_centro_custo_debito = "001",
+            numero_centro_custo_credito = "002",
+            codigo_identificador_referencia_movimento = "REF-001",
+            codigo_produto_operacional = 1,
+            identificador_evento_negocio = 1001L,
+            codigo_empresa = 1,
+            identificador_grupo = null,
+            numero_identificador_cota_cliente = null,
+            numero_grupo_bem_produto_consorcio = "GRP-001",
+            numero_cota_consorcio = 1,
+            numero_sequencial_versao = 1,
+            numero_contrato = 123456789L,
+            data_hora_venda = null,
+            data_contemplacao_consorcio = null,
+            data_entrega_bem_consorcio = null,
+            codigo_situacao_cobranca = null,
+            data_cancelamento_cota = null,
+            codigo_situacao_grupo = null,
+            codigo_tipo_empresa_origem = "ITAU",
+            codigo_empresa_origem = "001",
+            codigo_dependencia_origem = "0001",
+            codigo_tipo_empresa_destino = "ITAU",
+            codigo_empresa_destino = "001",
+            codigo_dependencia_destino = "0001",
+            indicador_status_estorno = "N",
+            sigla_sistema_evento = "SIS",
+            numero_parcela_contrato = null,
+            numero_prazo_cota = null,
+            data_vencimento_parcela_contrato = null,
+            data_contabil_transacao = DateTime.UtcNow.ToString("yyyy-MM-dd"),
+            indicador_tributacao_imposto = null,
+            valor_contrato_adesao = null,
+            valor_fundo_comum = null,
+            valor_fundo_reserva = null,
+            valor_taxa_administracao_paga = null,
+            valor_seguro_pagar = null,
+            valor_multa_juro_pagar = null,
+            valor_multa_juro_administradora = null,
+            valor_outro = null,
+            valor_total_grupo = null,
+            valor_total_demais_parcela = null,
+            valor_total_lancamento = 1500.00,
+            valor_total_tributacao = null,
+            indicador_tarife_movimento = null,
+            data_operacao_origem = null,
+            codigo_tipo_motivo_estorno = null,
+            codigo_unico_transacao_origem = null,
+            codigo_sistema_integrador = "SIS-INT",
+            indicador_grupo_antes_lei = null
         }
+    };
 
-        public void Dispose()
-        {
-            _codigoIdentificacao.Dispose();
-            _codigoEmpresa.Dispose();
-            _codigoReferencia.Dispose();
-            _dataProcessamento.Dispose();
-        }
-    }
+    var result = await producer.ProduceAsync(TOPIC, new Message<string, RecebimentoMovimentoContabil>
+    {
+        Key = movimento.data.codigo_identificacao_movimentacao_financeira,
+        Value = movimento
+    });
+
+    LogSuccess($"Mensagem publicada | Offset: {result.Offset} | Partition: {result.Partition}");
 }
-
-Tarefa 2 — Usar o LogMovimentoContext no ProcessarMovimentoContabilWorkerHandler.cs, envolvendo todo o fluxo do método Handle:
-csharppublic async Task<ICommandResult> Handle(...)
+catch (Exception ex)
 {
-    var movimento = RecebimentoMovimentoContabil.MapearParaEntidade(recebimentoResult);
-
-    using var logCtx = new LogMovimentoContext(
-        movimento.CodigoIdentificacaoMovimentacaoFinanceira,
-        movimento.CodigoEmpresa,
-        movimento.CodigoIdentificadorReferenciaMovimento
-    );
-
-    // todo o restante do método — todos os logs ganham o contexto automaticamente
+    LogError($"Erro ao publicar mensagem: {ex.Message}");
+    throw;
 }
-
-Tarefa 3 — Usar o LogMovimentoContext no MovimentoContabilRepository.cs, no método InserirMovimentoContabilAsync:
-csharpusing var logCtx = new LogMovimentoContext(
-    movimentoContabil.CodigoIdentificacaoMovimentacaoFinanceira,
-    movimentoContabil.CodigoEmpresa,
-    movimentoContabil.CodigoIdentificadorReferenciaMovimento
-);
-
-Critério de aceite:
-
-Classe LogMovimentoContext criada em Infra.Logging
-Usada no handler e no repository
-Todos os logs do fluxo passam a ter CodigoIdentificacaoMovimentacaoFinanceira, CodigoEmpresa, CodigoIdentificadorReferenciaMovimento e DataProcessamento automaticamente no Datadog
-Build sem erros, sem quebrar testes existentes
