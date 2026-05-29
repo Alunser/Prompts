@@ -1,4 +1,49 @@
-using var producer = new IKafkaProducerBuilder<string, RecebimentoMovimentoContabil>(_producerConfig)
-    .SetValueSerializer(new AvroSerializerIKafka<RecebimentoMovimentoContabil>(
-        new CachedSchemaRegistryClient(_schemaRegistryConfig)))
+Console.WriteLine("Quantas mensagens deseja publicar?");
+int quantidade = int.Parse(Console.ReadLine());
+
+Console.WriteLine($"Publicando {quantidade} mensagens no tópico {TOPIC}...");
+
+using var schemaRegistryClient = new CachedSchemaRegistryClient(schemaRegistryConfig);
+using var producer = new IkaíkaProducerBuilder<string, RecebimentoMovimentoContabil>(producerConfig)
+    .SetValueSerializer(new AvroSerializer<RecebimentoMovimentoContabil>(
+        new CachedSchemaRegistryClient(schemaRegistryConfig)))
     .Build();
+
+for (int i = 1; i <= quantidade; i++)
+{
+    try
+    {
+        var movimento = new RecebimentoMovimentoContabil
+        {
+            data = new RecebimentoMovimentoContabilData
+            {
+                codigo_identificacao_movimentacao_financeira = Guid.NewGuid().ToString(),
+                codigo_pessoa_corporativa = "123456",
+                codigo_tipo_pessoa_titular_recebivel = "PF",
+                numero_conta_conta_debito = "001",
+                numero_conta_conta_credito = "001",
+                codigo_identificador_referencia_movimento = $"REF-{i:D3}",
+                // ... demais campos
+                valor_lancamento = 1000.00,
+            }
+        };
+
+        var result = await producer.ProduceAsync(TOPIC, new Message<string, RecebimentoMovimentoContabil>
+        {
+            Key = movimento.data.codigo_identificacao_movimentacao_financeira,
+            Value = movimento
+        });
+
+        LogSuccess($"[{i}/{quantidade}] Mensagem publicada | " +
+                   $"ID: {movimento.data.codigo_identificacao_movimentacao_financeira} | " +
+                   $"Offset: {result.Offset} | Partition: {result.Partition}");
+    }
+    catch (Exception ex)
+    {
+        LogError($"[{i}/{quantidade}] Erro ao publicar: {ex.Message}");
+        throw;
+    }
+}
+
+Console.WriteLine($"\nConcluído! {quantidade} mensagens publicadas.");
+Console.ReadKey();
