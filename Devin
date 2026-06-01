@@ -1,49 +1,127 @@
-Console.WriteLine("Quantas mensagens deseja publicar?");
-int quantidade = int.Parse(Console.ReadLine());
+Contexto:
+Temos uma API C# (ASP.NET Core) com padrão repository/facade. Existem duas views no EF Core:
 
-Console.WriteLine($"Publicando {quantidade} mensagens no tópico {TOPIC}...");
+VwTaAclCobrancasAvulsas (avulsas principal)
+VwTaAclCobrancaAvulsaDetalhes (detalhes da avulsa, com IdConfi008 e IdCdMovtoFin)
 
-using var schemaRegistryClient = new CachedSchemaRegistryClient(schemaRegistryConfig);
-using var producer = new IkaíkaProducerBuilder<string, RecebimentoMovimentoContabil>(producerConfig)
-    .SetValueSerializer(new AvroSerializer<RecebimentoMovimentoContabil>(
-        new CachedSchemaRegistryClient(schemaRegistryConfig)))
-    .Build();
+Existe também a classe estática MovimentoCobrancaConverter com o método ObterCodigosPorTipo(string tipo) que retorna uma List<int> de códigos de movimento por tipo ("P", "L", "A", "Q", "T", "O"). O tipo "O" retorna lista vazia (significa "todos os movimentos").
 
-for (int i = 1; i <= quantidade; i++)
+Problema identificado:
+Em dois métodos (GetPaginacao na Facade e GetCobrancasEmitidas no controller), quando codigosMovimento != null, o código chama GetCobrancasAvulsasTodos passando apenas IdCota, carrega tudo em memória e filtra depois. O codigosMovimento nunca é passado para o repositório.
+
+O que precisa ser feito:
+1. No repositório, alterar os métodos já existentes GetCobrancasAvulsas e GetCountAvulsas adicionando os parâmetros opcionais codigosMovimento e excluirCodigos:
+csharp// Antes:
+public async Task<List<VwTaAclCobrancasAvulsas>> GetCobrancasAvulsas(
+    List<int> id_cota, int numPage, int sizePage)
+
+// Depois:
+public async Task<List<VwTaAclCobrancasAvulsas>> GetCobrancasAvulsas(
+    List<int> id_cota,
+    int numPage,
+    int sizePage,
+    List<int>? codigosMovimento = null,
+    bool excluirCodigos = false)
 {
-    try
-    {
-        var movimento = new RecebimentoMovimentoContabil
-        {
-            data = new RecebimentoMovimentoContabilData
-            {
-                codigo_identificacao_movimentacao_financeira = Guid.NewGuid().ToString(),
-                codigo_pessoa_corporativa = "123456",
-                codigo_tipo_pessoa_titular_recebivel = "PF",
-                numero_conta_conta_debito = "001",
-                numero_conta_conta_credito = "001",
-                codigo_identificador_referencia_movimento = $"REF-{i:D3}",
-                // ... demais campos
-                valor_lancamento = 1000.00,
-            }
-        };
+    var query = _dbContext.VwTaAclCobrancasAvulsas
+        .Where(_ => id_cota.Contains(_.IdCota))
+        .AsQueryable();
 
-        var result = await producer.ProduceAsync(TOPIC, new Message<string, RecebimentoMovimentoContabil>
-        {
-            Key = movimento.data.codigo_identificacao_movimentacao_financeira,
-            Value = movimento
-        });
-
-        LogSuccess($"[{i}/{quantidade}] Mensagem publicada | " +
-                   $"ID: {movimento.data.codigo_identificacao_movimentacao_financeira} | " +
-                   $"Offset: {result.Offset} | Partition: {result.Partition}");
-    }
-    catch (Exception ex)
+    if (codigosMovimento != null && codigosMovimento.Any())
     {
-        LogError($"[{i}/{quantidade}] Erro ao publicar: {ex.Message}");
-        throw;
+        var idsComMovimento = await _dbContext.VwTaAclCobrancaAvulsaDetalhes
+            .Where(d => excluirCodigos
+                ? !codigosMovimento.Contains(d.IdCdMovtoFin)
+                :  codigosMovimento.Contains(d.IdCdMovtoFin))
+            .Select(d => d.IdConfi008)
+            .Distinct()
+            .ToListAsync();
+
+        query = query.Where(_ => idsComMovimento.Contains(_.IdConfi008));
     }
+
+    return await query
+        .OrderBy(_ => _.IdCota)
+        .Skip((numPage - 1) * sizePage)
+        .Take(sizePage)
+        .AsNoTracking()
+        .ToListAsync();
+}
+csharp// Antes:
+public async Task<int> GetCountAvulsas(List<int> id_cota)
+
+// Depois:
+public async Task<int> GetCountAvulsas(
+    List<int> id_cota,
+    List<int>? codigosMovimento = null,
+    bool excluirCodigos = false)
+{
+    var query = _dbContext.VwTaAclCobrancasAvulsas
+        .Where(_ => id_cota.Contains(_.IdCota))
+        .AsQueryable();
+
+    if (codigosMovimento != null && codigosMovimento.Any())
+    {
+        var idsComMovimento = await _dbContext.VwTaAclCobrancaAvulsaDetalhes
+            .Where(d => excluirCodigos
+                ? !codigosMovimento.Contains(d.IdCdMovtoFin)
+                :  codigosMovimento.Contains(d.IdCdMovtoFin))
+            .Select(d => d.IdConfi008)
+            .Distinct()
+            .ToListAsync();
+
+        query = query.Where(_ => idsComMovimento.Contains(_.IdConfi008));
+    }
+
+    return await query.AsNoTracking().CountAsync();
+}
+2. Atualizar as assinaturas na interface do repositório com os mesmos parâmetros opcionais.
+3. Na Facade, no método GetPaginacao, substituir o bloco inteiro de count por:
+csharp// ❌ REMOVER:
+if (codigosMovimento != null)
+{
+    var allAvulsas = await _repo.GetCobrancasAvulsasTodos(request.IdCota);
+    var idConfi008List = allAvulsas.Select(_ => _.IdConfi008).Distinct().ToList();
+    var detalhes = await _repo.GetCobrancasAvulsasDetalhes(idConfi008List, codigosMovimento, excluirCodigos);
+    countAvulsas = allAvulsas.Count(a => detalhes.Any(d => d.IdConfi008 == a.IdConfi008));
+}
+else
+{
+    countAvulsas = await _repo.GetCountAvulsas(request.IdCota);
 }
 
-Console.WriteLine($"\nConcluído! {quantidade} mensagens publicadas.");
-Console.ReadKey();
+// ✅ SUBSTITUIR por:
+countAvulsas = await _repo.GetCountAvulsas(
+    request.IdCota,
+    codigosMovimento,
+    excluirCodigos);
+4. No controller, no método GetCobrancasEmitidas, substituir o bloco equivalente por:
+csharp// ❌ REMOVER:
+if (codigosMovimento != null)
+{
+    var allAvulsas = await _repo.GetCobrancasAvulsasTodos(request.IdCota);
+    var idConfi008List = allAvulsas.Select(_ => _.IdConfi008).Distinct().ToList();
+    var detalhes = await _repo.GetCobrancasAvulsasDetalhes(idConfi008List, codigosMovimento, excluirCodigos);
+    avulsas = allAvulsas.Where(a => detalhes.Any(d => d.IdConfi008 == a.IdConfi008)).ToList();
+}
+else
+{
+    avulsas = await _repo.GetCobrancasAvulsas(request.IdCota, numPage, sizePage);
+}
+
+// ✅ SUBSTITUIR por:
+avulsas = await _repo.GetCobrancasAvulsas(
+    request.IdCota,
+    numPage,
+    sizePage,
+    codigosMovimento,
+    excluirCodigos);
+
+Regras de negócio importantes:
+TipoMovimentoCobrancacodigosMovimentoComportamento esperadonull ou vazionullSem filtro de movimento"O"[] (lista vazia)Sem filtro (retorna todos)"T"[1660, 1670, ...]Filtra pelos códigos"L"[410, 420, ...]Filtra pelos códigos
+
+Importante:
+
+Como os parâmetros novos são opcionais com valor padrão null e false, todas as chamadas existentes continuam funcionando sem alteração
+Não alterar nenhum outro método
+Garantir que os testes existentes continuam passando
