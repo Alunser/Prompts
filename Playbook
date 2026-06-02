@@ -1,49 +1,22 @@
-using Itau.IKafka;
+Para garantir que o Devin só abra um Pull Request quando houver de fato alguma divergência e alterações reais nos arquivos, o ideal é deixar a instrução condicional bem explícita. Agentes autônomos às vezes tentam concluir todas as etapas listadas, mesmo que não haja o que fazer, então adicionar uma "rota de saída" resolve isso.
 
-// — Configurações —
-const string BROKER_URL  = "kafka-events.dev.aws.cloud.ihf:31101";
-const string TOPIC       = "emprestimos-e-financiamentos-recebimentos-movimento-contabil";
-const string CLIENT_ID   = "fx9_client_id_emt_ret_movimento_contabil_dev";
-const string CLIENT_USER = "FX90008";
-const string CLIENT_PASS = "gAAAAABj4T0as5aDHA5gqKnmjJf7EvC9G4x-_xq6oCARgh0otNKg3SHWpaXsTdm2QAiZVrFH1j1WPeHVengawdSQp8x7fr8FYQ==";
+Aqui estão as sugestões de ajustes que você pode fazer no seu playbook:
 
-const string CA_CERT      = "./certs/caroot.crt";
-const string P12_LOCATION = "./certs/FX90008.p12";
-const string P12_PASSWORD = "tj3hm@*NrLG+SJp";
+1. Ajuste no Procedure
+Altere o passo 5 para deixar clara a condição de criação do PR:
 
-const string KAAS_APP_NAME   = "Worker Processar Movimento Contabil";
-const string KAAS_COMMUNITY  = "CONSORCIO";
-const string KAAS_SIGLA      = "FX9";
-const string KAAS_ENVIRONMENT = "Development";
+Como está: 5. PR: Cria um pull request no repositório de documentação com as melhorias efetuadas.
 
-var factory = new KafkaProducerFactory(
-    brokerUrl:       BROKER_URL,
-    clientId:        CLIENT_ID,
-    clientUser:      CLIENT_USER,
-    clientPassword:  CLIENT_PASS,
-    caCertLocation:  CA_CERT,
-    p12Location:     P12_LOCATION,
-    p12Password:     P12_PASSWORD,
-    appName:         KAAS_APP_NAME,
-    community:       KAAS_COMMUNITY,
-    sigla:           KAAS_SIGLA,
-    environment:     KAAS_ENVIRONMENT
-);
+Como deve ficar: 5. PR: Cria um pull request no repositório de documentação APENAS SE as etapas anteriores resultarem em alterações reais nos arquivos .md. Se nenhuma mudança for necessária (a doc já está atualizada), encerre a execução sem realizar commits ou abrir PR.
 
-var producer = factory.CreateProducer<string>();
+2. Adição em Forbidden actions (Recomendado para reforço)
+O Devin respeita muito essa seção, então adicionar uma regra restritiva aqui é a melhor forma de evitar PRs vazios:
 
-var mensagem = new KafkaMessage<string>
-{
-    Key   = Guid.NewGuid().ToString(),
-    Value = """{ "teste": "hello kafka" }"""
-};
+Adicione: Nunca crie uma branch, commit ou abra um Pull Request se a análise confirmar que a documentação já está sincronizada com as Controllers e Dtos de origem.
 
-try
-{
-    var result = await producer.ProduceAsync(TOPIC, mensagem);
-    Console.WriteLine($"✅ Publicado! Offset: {result.Offset} | Partition: {result.Partition}");
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"❌ Erro: {ex.Message}");
-}
+3. Adição em Advice & Pointers (Opcional)
+Para ajudar no raciocínio (Chain of Thought) do agente:
+
+Adicione: Após a etapa 3 (Análise), valide explicitamente se há diff a ser gerado. Se não houver, faça o output de uma mensagem informando que os repositórios estão sincronizados e pare por aí.
+
+Essas pequenas mudanças dão ao Devin a permissão e a diretriz clara de que "não fazer nada" é o comportamento esperado caso a documentação já esteja correta.
