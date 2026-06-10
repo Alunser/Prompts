@@ -1,11 +1,10 @@
-376     aws ssm start-session \
-377         --target "$BASTION_HOST" \
-378         --document-name AWS-StartPortForwardingSessionToRemoteHost \
-379         --parameters "host=$HOST,portNumber=$PORT,localPortNumber=$LOCAL_PORT"
-380
-        # ↓↓↓ ADICIONE AQUI ↓↓↓
-        EXIT_CODE=$?
-        echo
-        echo "### Sessão encerrada (código $EXIT_CODE) ###"
-        echo "Pressione ENTER para fechar..."
-        read
+366     fi
+367
+        # Mata túneis SSM órfãos antes de abrir o novo
+        echo "Liberando porta local..."
+        /c/Windows/System32/taskkill.exe //F //IM session-manager-plugin.exe 2>/dev/null
+        sleep 1
+
+368     aws ssm start-session \
+369         --target "$BASTION_HOST" \
+...
