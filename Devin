@@ -1,5 +1,6 @@
-EventBridge — dev:
-'{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"lambda:InvokeFunction","Resource":["arn:aws:lambda:sa-east-1:714043215415:function:plat-cont-val-conc-ctb-lbd"]}]}'
-
-Step Functions — dev:
-'{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["lambda:InvokeFunction"],"Resource":["arn:aws:lambda:sa-east-1:714043215415:function:plat-cont-val-conc-ctb-lbd","arn:aws:lambda:sa-east-1:714043215415:function:plat-cont-val-conc-ctb-lbd:*"]},{"Effect":"Allow","Action":["logs:CreateLogDelivery","logs:GetLogDelivery","logs:UpdateLogDelivery","logs:DeleteLogDelivery","logs:ListLogDeliveries","logs:PutResourcePolicy","logs:DescribeResourcePolicies","logs:DescribeLogGroups"],"Resource":"*"}]}'
+# Mata túneis SSM órfãos segurando a porta local
+if netstat -ano | grep -q ":$LOCAL_PORT .*LISTENING"; then
+    echo "Porta $LOCAL_PORT ocupada, liberando..."
+    taskkill //F //IM session-manager-plugin.exe 2>/dev/null
+    sleep 1
+fi
