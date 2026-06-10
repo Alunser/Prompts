@@ -1,6 +1,7 @@
 # Mata túneis SSM órfãos segurando a porta local
-if netstat -ano | grep -q ":$LOCAL_PORT .*LISTENING"; then
-    echo "Porta $LOCAL_PORT ocupada, liberando..."
+if command -v taskkill >/dev/null 2>&1; then
     taskkill //F //IM session-manager-plugin.exe 2>/dev/null
-    sleep 1
+elif command -v taskkill.exe >/dev/null 2>&1; then
+    taskkill.exe /F /IM session-manager-plugin.exe 2>/dev/null
 fi
+sleep 1
