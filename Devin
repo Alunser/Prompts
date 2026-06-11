@@ -1,123 +1,143 @@
-Prompt Devin — Implementar Dependencies (Composition Root)
+Prompt Devin — Implementar RdsClient
 
 Objetivo
 
-Criar o app/src/handlers/dependencies.py seguindo o padrão Composition Root,
-centralizando a construção de todas as dependências da Lambda em um único lugar.
+Implementar o app/src/clients/aws/rds_client.py seguindo o padrão da codebase.
 
 
-O que é e por que usar
+Referência — como estava na Lambda de referência
 
-O Dependencies é um container de dependências — um único lugar responsável por
-instanciar e montar todas as peças que a Lambda precisa. O handler fica limpo,
-apenas orquestrando o fluxo, sem se preocupar com como as dependências são criadas.
+pythonclass RdsClient:
+    """
+    O client é a camada que comunica com o RDS MySQL.
+    """
+    def __init__(self):
+        rds_endpoint = SecretManagerClient.get_secret(RDS_SERVER)
+        self.host, self.port = parse_endpoint(rds_endpoint, default_port=3306)
+        self.database = RDS_DATABASE
+        self.user = SecretManagerClient.get_secret(RDS_USERNAME)
+        self.password = SecretManagerClient.get_secret(RDS_PASSWORD)
+        self._connection = None
+
+    def _get_connection(self):
+        if self._connection is None or not self._connection.open:
+            try:
+                self._connection = pymysql.connect(
+                    host=self.host,
+                    port=self.port,
+                    user=self.user,
+                    password=self.password,
+                    database=self.database,
+                    cursorclass=pymysql.cursors.DictCursor,  # ← usar DictCursor (melhoria)
+                    autocommit=False,
+                )
+                logger.info("Conexão RDS estabelecida com sucesso")
+            except UnicodeError as e:
+                logger.error("Erro de hostname inválido ao conectar ao RDS: %s", e)
+                raise InvalidEndpointError(
+                    f"Hostname inválido para conexão RDS: {self.host}"
+                ) from e
+        return self._connection
 
 
-Implementar app/src/handlers/dependencies.py
+O que implementar
+
+app/src/clients/aws/rds_client.py
 
 pythonimport logging
-from dataclasses import dataclass
+import pymysql
+import pymysql.cursors
 
-from src.clients.aws.rds_client import RdsClient
 from src.clients.aws.secret_manager_client import SecretManagerClient
-from src.clients.external.contabilizacoes_client import ContabilizacoesClient
-from src.clients.external.sts_client import StsTokenClient
+from src.utils.constants import RDS_SERVER, RDS_DATABASE, RDS_USERNAME, RDS_PASSWORD
+from src.utils.endpoint_parser import parse_endpoint, InvalidEndpointError
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class Dependencies:
+class RdsClient:
     """
-    Composition Root — centraliza a construção de todas as dependências da Lambda.
-    Facilita testes (injetar mocks) e mantém o handler limpo.
+    Camada de conexão com o RDS MySQL.
+    Busca credenciais via SecretManagerClient (com cache).
+    Lazy connection — só conecta quando get_connection() é chamado.
     """
-    rds_client: RdsClient
-    contabilizacoes_client: ContabilizacoesClient
 
-    @classmethod
-    def build(cls) -> "Dependencies":
+    def __init__(self):
+        # Busca os 3 secrets separados (padrão Itaú)
+        rds_endpoint = SecretManagerClient.get_secret(RDS_SERVER)
+        self.host, self.port = parse_endpoint(rds_endpoint, default_port=3306)
+        self.database = RDS_DATABASE
+        self.user = SecretManagerClient.get_secret(RDS_USERNAME)
+        self.password = SecretManagerClient.get_secret(RDS_PASSWORD)
+        self._connection = None
+
+    def get_connection(self) -> pymysql.Connection:
         """
-        Constrói todas as dependências reais.
-        Chamado pelo handler em produção.
+        Retorna conexão ativa. Reconecta se a conexão estiver fechada.
+        Usa DictCursor para retornar dicionários em vez de tuplas.
         """
-        logger.info("Construindo dependências")
-        secret_manager = SecretManagerClient()
-        sts_client = StsTokenClient(secret_manager_client=secret_manager)
-        contabilizacoes_client = ContabilizacoesClient(sts_client=sts_client)
-        rds_client = RdsClient()
+        if self._connection is None or not self._connection.open:
+            try:
+                self._connection = pymysql.connect(
+                    host=self.host,
+                    port=self.port,
+                    user=self.user,
+                    password=self.password,
+                    database=self.database,
+                    cursorclass=pymysql.cursors.DictCursor,
+                    autocommit=False,
+                )
+                logger.info("Conexão RDS estabelecida com sucesso")
+            except UnicodeError as e:
+                logger.error("Erro de hostname inválido ao conectar ao RDS: %s", e)
+                raise InvalidEndpointError(
+                    f"Hostname inválido para conexão RDS: {self.host}"
+                ) from e
+        return self._connection
 
-        return cls(
-            rds_client=rds_client,
-            contabilizacoes_client=contabilizacoes_client,
-        )
-
-
-Atualizar app/src/handlers/orchestration.py
-
-pythonimport json
-import logging
-
-import boto3
-
-from src.handlers.dependencies import Dependencies
-from src.models import LoteInput
-from src.repositories.evento_repository import EventoRepository
-from src.services.lote_service import LoteService
-from src.utils.constants import LOG_INICIO, LOG_SUCESSO
-from src.utils.logger import setup_logger
-
-setup_logger()
-logger = logging.getLogger(__name__)
+    def close(self) -> None:
+        """Fecha a conexão se estiver aberta."""
+        if self._connection and self._connection.open:
+            self._connection.close()
+            logger.info("Conexão RDS encerrada")
 
 
-def handler(event: dict, context) -> dict:
-    logger.info(LOG_INICIO.format(lote_id=event.get("loteId")))
+Atualizar constants.py
 
-    input_data = LoteInput.from_event(event)
-    deps = Dependencies.build()
+Verificar se as constantes abaixo já existem — se não existirem, adicionar:
 
-    try:
-        conn = deps.rds_client.get_connection()
-        repo = EventoRepository(conn)
-        service = LoteService(
-            repo=repo,
-            contabilizacoes_client=deps.contabilizacoes_client,
-        )
-        result = service.processar(input_data)
-    finally:
-        deps.rds_client.close()
-
-    logger.info(LOG_SUCESSO)
-    return result.to_dict()
+python# Database Configuration
+RDS_SERVER = getenv("RDS_SERVER")       # nome do secret com o endpoint
+RDS_DATABASE = getenv("RDS_DATABASE")   # nome do banco
+RDS_USERNAME = getenv("RDS_USERNAME")   # nome do secret com o usuário
+RDS_PASSWORD = getenv("RDS_PASSWORD")   # nome do secret com a senha
 
 
-Como testar o handler com Dependencies fake
+Atualizar handlers/orchestration.py
 
-pythonfrom unittest.mock import MagicMock
-from src.handlers.dependencies import Dependencies
+Substituir o get_connection() standalone pelo RdsClient:
 
-def test_handler_envio_ok():
-    mock_deps = Dependencies(
-        rds_client=MagicMock(),
-        contabilizacoes_client=MagicMock(),
-    )
-    # injeta o mock no lugar do Dependencies.build()
-    with patch("src.handlers.orchestration.Dependencies") as mock_cls:
-        mock_cls.build.return_value = mock_deps
-        result = handler({"loteId": "LOTE-001", "tipo": "envio"}, {})
-        assert result["status"] == "validado"
+pythonrds_client = RdsClient()
+try:
+    conn = rds_client.get_connection()
+    repo = EventoRepository(conn)
+    service = LoteService(repo=repo, contabilizacoes_client=contabilizacoes_client)
+    result = service.processar(input_data)
+finally:
+    rds_client.close()
 
 
-Testes — app/tests/src/handlers/test_dependencies.py
+Testes — app/tests/src/clients/aws/test_rds_client.py
 
-CenárioO que testarbuild() retorna instância corretaisinstance(deps, Dependencies)rds_client é RdsClientisinstance(deps.rds_client, RdsClient)contabilizacoes_client é ContabilizacoesClientisinstance(deps.contabilizacoes_client, ContabilizacoesClient)
+Mockar: SecretManagerClient.get_secret, pymysql.connect
+
+CenárioO que testarConexão okget_connection() retorna conexão, pymysql.connect chamado com params corretosReconexãose connection.open = False, reconecta automaticamenteCache de conexãosegunda chamada a get_connection() não chama pymysql.connect de novoHostname inválidoUnicodeError levanta InvalidEndpointErrorEndpoint com portahost:3307 → host e porta extraídos corretamenteEndpoint sem portasó host → usa porta default 3306Closeclose() chama connection.close()
 
 
 Regras obrigatórias
 
 
-Dependencies fica em handlers/dependencies.py — responsabilidade do handler
-Dependencies.build() é o único lugar que instancia dependências reais
-Nos testes, sempre criar Dependencies com mocks via construtor — nunca chamar build()
-Não adicionar lógica de negócio no Dependencies — só construção de objetos
+Usar DictCursor — não Cursor — para retornar dicionários
+autocommit=False — commit explícito no repository
+Secrets via SecretManagerClient.get_secret() — nunca os.environ direto para senha
+Método close() explícito — chamado no finally do handler
