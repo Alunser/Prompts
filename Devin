@@ -1,1 +1,123 @@
-'{"Comment":"Orquestração de lote contábil","StartAt":"ValidarLote","States":{"ValidarLote":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke","Parameters":{"FunctionName":"arn:aws:lambda:sa-east-1:ACCOUNT_ID:function:plat-cont-val-conc-ctb-lbd","Payload.$":"$"},"ResultSelector":{"resultado.$":"$.Payload"},"ResultPath":"$.resultado","Next":"VerificarStatus"},"VerificarStatus":{"Type":"Choice","Choices":[{"Variable":"$.resultado.status","StringEquals":"pendente","Next":"ProximoBatch"},{"Variable":"$.resultado.status","StringEquals":"validado","Next":"AcionarGlue"}]},"ProximoBatch":{"Type":"Pass","Parameters":{"loteId.$":"$.loteId","tipo.$":"$.tipo","ultimo_id.$":"$.resultado.ultimo_id"},"Next":"ValidarLote"},"AcionarGlue":{"Type":"Task","Resource":"arn:aws:states:::glue:startJobRun.sync","Parameters":{"JobName":"NOME_DO_GLUE_JOB","Arguments":{"--lote_id.$":"$.loteId"}},"Next":"Concluido"},"Concluido":{"Type":"Succeed"}}}'
+Prompt Devin — Implementar Dependencies (Composition Root)
+
+Objetivo
+
+Criar o app/src/handlers/dependencies.py seguindo o padrão Composition Root,
+centralizando a construção de todas as dependências da Lambda em um único lugar.
+
+
+O que é e por que usar
+
+O Dependencies é um container de dependências — um único lugar responsável por
+instanciar e montar todas as peças que a Lambda precisa. O handler fica limpo,
+apenas orquestrando o fluxo, sem se preocupar com como as dependências são criadas.
+
+
+Implementar app/src/handlers/dependencies.py
+
+pythonimport logging
+from dataclasses import dataclass
+
+from src.clients.aws.rds_client import RdsClient
+from src.clients.aws.secret_manager_client import SecretManagerClient
+from src.clients.external.contabilizacoes_client import ContabilizacoesClient
+from src.clients.external.sts_client import StsTokenClient
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Dependencies:
+    """
+    Composition Root — centraliza a construção de todas as dependências da Lambda.
+    Facilita testes (injetar mocks) e mantém o handler limpo.
+    """
+    rds_client: RdsClient
+    contabilizacoes_client: ContabilizacoesClient
+
+    @classmethod
+    def build(cls) -> "Dependencies":
+        """
+        Constrói todas as dependências reais.
+        Chamado pelo handler em produção.
+        """
+        logger.info("Construindo dependências")
+        secret_manager = SecretManagerClient()
+        sts_client = StsTokenClient(secret_manager_client=secret_manager)
+        contabilizacoes_client = ContabilizacoesClient(sts_client=sts_client)
+        rds_client = RdsClient()
+
+        return cls(
+            rds_client=rds_client,
+            contabilizacoes_client=contabilizacoes_client,
+        )
+
+
+Atualizar app/src/handlers/orchestration.py
+
+pythonimport json
+import logging
+
+import boto3
+
+from src.handlers.dependencies import Dependencies
+from src.models import LoteInput
+from src.repositories.evento_repository import EventoRepository
+from src.services.lote_service import LoteService
+from src.utils.constants import LOG_INICIO, LOG_SUCESSO
+from src.utils.logger import setup_logger
+
+setup_logger()
+logger = logging.getLogger(__name__)
+
+
+def handler(event: dict, context) -> dict:
+    logger.info(LOG_INICIO.format(lote_id=event.get("loteId")))
+
+    input_data = LoteInput.from_event(event)
+    deps = Dependencies.build()
+
+    try:
+        conn = deps.rds_client.get_connection()
+        repo = EventoRepository(conn)
+        service = LoteService(
+            repo=repo,
+            contabilizacoes_client=deps.contabilizacoes_client,
+        )
+        result = service.processar(input_data)
+    finally:
+        deps.rds_client.close()
+
+    logger.info(LOG_SUCESSO)
+    return result.to_dict()
+
+
+Como testar o handler com Dependencies fake
+
+pythonfrom unittest.mock import MagicMock
+from src.handlers.dependencies import Dependencies
+
+def test_handler_envio_ok():
+    mock_deps = Dependencies(
+        rds_client=MagicMock(),
+        contabilizacoes_client=MagicMock(),
+    )
+    # injeta o mock no lugar do Dependencies.build()
+    with patch("src.handlers.orchestration.Dependencies") as mock_cls:
+        mock_cls.build.return_value = mock_deps
+        result = handler({"loteId": "LOTE-001", "tipo": "envio"}, {})
+        assert result["status"] == "validado"
+
+
+Testes — app/tests/src/handlers/test_dependencies.py
+
+CenárioO que testarbuild() retorna instância corretaisinstance(deps, Dependencies)rds_client é RdsClientisinstance(deps.rds_client, RdsClient)contabilizacoes_client é ContabilizacoesClientisinstance(deps.contabilizacoes_client, ContabilizacoesClient)
+
+
+Regras obrigatórias
+
+
+Dependencies fica em handlers/dependencies.py — responsabilidade do handler
+Dependencies.build() é o único lugar que instancia dependências reais
+Nos testes, sempre criar Dependencies com mocks via construtor — nunca chamar build()
+Não adicionar lógica de negócio no Dependencies — só construção de objetos
