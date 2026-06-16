@@ -3,7 +3,9 @@ Você está ajustando e implementando a Lambda Python chamada
 ProcessarLote dentro do projeto itau-fx9-app-plat-cont-val-conc-ctb-lbd.
 
 Essa Lambda é acionada pelo AWS Step Functions e é responsável
-por orquestrar o encerramento de um lote de processamento.
+por realizar a dupla validação do lote de processamento.
+
+---
 
 ## LIMPEZA PRIMEIRO — remover implementações anteriores
 
@@ -13,25 +15,31 @@ Substituir o conteúdo COMPLETO por:
 ```python
 from enum import Enum
 
+
 class TipoProcessamento(str, Enum):
     NORMAL = "normal"
     REPROCESSAMENTO = "reprocessamento"
 
-class StatusProcessamento(str, Enum):
-    PENDENTE = "pendente"
-    VALIDADO = "validado"
-```
 
-Motivo: StatusEvento foi removido pois não existe mais
-lote_erros na arquitetura. TipoProcessamento.ENVIO foi
-renomeado para NORMAL.
+class StatusProcessamento(str, Enum):
+    VALIDACAO_COM_SUCESSO = "validacao_com_sucesso"
+    VALIDACAO_COM_FALHA   = "validacao_com_falha"
+
+
+class CodProcessamento(int, Enum):
+    EM_PROCESSAMENTO       = 0
+    PROCESSAMENTO_VALIDADO = 1
+    VALIDACAO_COM_SUCESSO  = 2
+    VALIDACAO_COM_FALHA    = 3
+```
 
 ### 2. services/lote_service.py
 Remover toda a implementação atual e substituir
-pela nova implementação descrita abaixo.
+pela nova descrita abaixo.
 
 ### 3. repositories/
-Remover qualquer repository que faça referência a:
+Remover qualquer arquivo ou método que faça
+referência a:
 - lote_erros
 - ids_com_erro
 - marcar_como_enviado
@@ -67,7 +75,8 @@ src/
 ```json
 {
   "lote_id": "abc-123",
-  "tipo": "normal"
+  "tipo": "normal",
+  "data_batch": "2024-01-15"
 }
 ```
 
@@ -76,8 +85,36 @@ ou
 ```json
 {
   "lote_id": "abc-123",
-  "tipo": "reprocessamento"
+  "tipo": "reprocessamento",
+  "data_batch": "2024-01-15"
 }
+```
+
+---
+
+## Tabelas reais do banco MySQL
+
+### CTRL_LOTE_MOVI_CTB — tabela de controle do lote
+```sql
+COD_UNIC_LOTE     VARCHAR(36)  -- GUID do lote (PK)
+DAT_HOR_RFRC_PSST DATETIME     -- data referencia
+NOM_APLI_ORIG     VARCHAR(50)  -- nome aplicacao origem
+QTD_TOTL          NUMBER(10)   -- total esperado de registros
+COD_PSST          NUMBER(1)    -- status do processamento
+DAT_CRIA          DATETIME     -- data criacao
+DAT_ATUI          DATETIME     -- data atualizacao (heartbeat)
+```
+
+Valores de COD_PSST:
+- 0 = Em processamento
+- 1 = Processamento validado
+- 2 = Validacao finalizada com sucesso
+- 3 = Validacao finalizada com falha
+
+### SALD_CONT_CTBL_MLTO — tabela de negócio
+```sql
+COD_UNIC          VARCHAR(36)  -- GUID do lote (FK)
+-- demais campos de negocio
 ```
 
 ---
@@ -85,46 +122,28 @@ ou
 ## Regras de negócio
 
 ### Se tipo == TipoProcessamento.REPROCESSAMENTO:
-1. Chamar ContabilizacoesClient passando lote_id
-2. A API vai reprocessar o lote completo externamente
-3. Retornar StatusProcessamento.PENDENTE
-   para o Step Functions continuar o loop
+1. Chamar ContabilizacoesClient passando lote_id e data_batch
+2. A API reprocessa o lote externamente
+3. Fazer COUNT(*) em SALD_CONT_CTBL_MLTO
+   WHERE COD_UNIC = lote_id
+4. Buscar QTD_TOTL em CTRL_LOTE_MOVI_CTB
+   WHERE COD_UNIC_LOTE = lote_id
+5. COUNT == QTD_TOTL?
+   → SIM → UPDATE COD_PSST = 2
+          → retornar VALIDACAO_COM_SUCESSO
+   → NAO → UPDATE COD_PSST = 3
+          → retornar VALIDACAO_COM_FALHA
 
 ### Se tipo == TipoProcessamento.NORMAL:
-1. Buscar total_esperado em tb_lote_controle
-   WHERE lote_id = input.lote_id
-2. Fazer COUNT(*) em tb_movimentos
-   WHERE lote_id = input.lote_id
-3. Se COUNT(*) == total_esperado:
-   → retornar StatusProcessamento.VALIDADO
-   → Step Functions vai acionar o Glue
-4. Se COUNT(*) != total_esperado:
-   → retornar StatusProcessamento.PENDENTE
-   → Step Functions vai chamar a Lambda novamente
-
----
-
-## Tabelas MySQL (fictícias — serão ajustadas depois)
-
-```sql
-CREATE TABLE tb_lote_controle (
-    lote_controle_id  VARCHAR(36) PRIMARY KEY,
-    lote_id           VARCHAR(36) UNIQUE,
-    data_batch        DATE,
-    total_esperado    INT,
-    status            VARCHAR(20),
-    step_fn_acionado  TINYINT(1) DEFAULT 0,
-    data_criacao      DATETIME DEFAULT CURRENT_TIMESTAMP,
-    data_alteracao    DATETIME DEFAULT CURRENT_TIMESTAMP
-                      ON UPDATE CURRENT_TIMESTAMP
-);
-
-CREATE TABLE tb_movimentos (
-    id_evento    VARCHAR(36) PRIMARY KEY,
-    lote_id      VARCHAR(36),
-    data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-```
+1. Fazer COUNT(*) em SALD_CONT_CTBL_MLTO
+   WHERE COD_UNIC = lote_id
+2. Buscar QTD_TOTL em CTRL_LOTE_MOVI_CTB
+   WHERE COD_UNIC_LOTE = lote_id
+3. COUNT == QTD_TOTL?
+   → SIM → UPDATE COD_PSST = 2
+          → retornar VALIDACAO_COM_SUCESSO
+   → NAO → UPDATE COD_PSST = 3
+          → retornar VALIDACAO_COM_FALHA
 
 ---
 
@@ -136,6 +155,7 @@ CREATE TABLE tb_movimentos (
 class LoteInput:
     lote_id: str
     tipo: TipoProcessamento
+    data_batch: str
 ```
 
 ### models/lote_response.py
@@ -147,15 +167,23 @@ class LoteResponse:
 ```
 
 ### repositories/lote_repository.py
-Implementar dois métodos:
+Implementar os seguintes métodos:
 
 - buscar_total_esperado(lote_id: str) -> int
-  → SELECT total_esperado FROM tb_lote_controle
-    WHERE lote_id = :lote_id
+  → SELECT QTD_TOTL
+    FROM CTRL_LOTE_MOVI_CTB
+    WHERE COD_UNIC_LOTE = :lote_id
 
 - contar_movimentos(lote_id: str) -> int
-  → SELECT COUNT(*) FROM tb_movimentos
-    WHERE lote_id = :lote_id
+  → SELECT COUNT(*)
+    FROM SALD_CONT_CTBL_MLTO
+    WHERE COD_UNIC = :lote_id
+
+- atualizar_status(lote_id: str, status: CodProcessamento) -> None
+  → UPDATE CTRL_LOTE_MOVI_CTB
+    SET COD_PSST = :status,
+        DAT_ATUI = NOW()
+    WHERE COD_UNIC_LOTE = :lote_id
 
 ### services/lote_service.py
 ```python
@@ -173,14 +201,14 @@ class LoteService:
         if input_data.tipo == TipoProcessamento.REPROCESSAMENTO:
             logger.info(
                 "Reprocessamento solicitado",
-                extra={"lote_id": input_data.lote_id}
+                extra={
+                    "lote_id": input_data.lote_id,
+                    "data_batch": input_data.data_batch,
+                }
             )
             self.contabilizacoes_client.reprocessar(
-                lote_id=input_data.lote_id
-            )
-            return LoteResponse(
-                status=StatusProcessamento.PENDENTE,
                 lote_id=input_data.lote_id,
+                data_batch=input_data.data_batch,
             )
 
         total_esperado = self.repo.buscar_total_esperado(
@@ -194,33 +222,42 @@ class LoteService:
             "Verificando contagem do lote",
             extra={
                 "lote_id": input_data.lote_id,
+                "data_batch": input_data.data_batch,
                 "total_esperado": total_esperado,
                 "total_inserido": total_inserido,
             }
         )
 
         if total_inserido == total_esperado:
+            self.repo.atualizar_status(
+                input_data.lote_id,
+                CodProcessamento.VALIDACAO_COM_SUCESSO,
+            )
             return LoteResponse(
-                status=StatusProcessamento.VALIDADO,
+                status=StatusProcessamento.VALIDACAO_COM_SUCESSO,
                 lote_id=input_data.lote_id,
             )
 
+        self.repo.atualizar_status(
+            input_data.lote_id,
+            CodProcessamento.VALIDACAO_COM_FALHA,
+        )
         return LoteResponse(
-            status=StatusProcessamento.PENDENTE,
+            status=StatusProcessamento.VALIDACAO_COM_FALHA,
             lote_id=input_data.lote_id,
         )
 ```
 
 ### handlers/dependencies.py
 Atualizar Composition Root:
-- Remover qualquer referência a EventoRepository
+- Remover referências a EventoRepository
 - Adicionar LoteRepository
 - Seguir padrão já existente no arquivo
 
 ### handlers/orchestration.py
 Atualizar handler:
 - Receber input do Step Functions
-- Parsear como LoteInput
+- Parsear como LoteInput incluindo data_batch
 - Instanciar Dependencies.build()
 - Chamar LoteService.processar()
 - Retornar LoteResponse como dict
@@ -231,21 +268,31 @@ Atualizar handler:
 
 Criar os seguintes testes unitários:
 
-- test_processar_reprocessamento
-  → deve chamar contabilizacoes_client.reprocessar
-  → deve retornar status PENDENTE
-
 - test_processar_normal_count_bate
   → total_esperado == total_inserido
-  → deve retornar status VALIDADO
+  → deve UPDATE COD_PSST = 2
+  → deve retornar VALIDACAO_COM_SUCESSO
 
 - test_processar_normal_count_nao_bate
   → total_esperado != total_inserido
-  → deve retornar status PENDENTE
+  → deve UPDATE COD_PSST = 3
+  → deve retornar VALIDACAO_COM_FALHA
 
-- test_processar_normal_sem_lote
-  → lote_id não encontrado no banco
-  → deve lançar exceção
+- test_processar_reprocessamento_count_bate
+  → deve chamar contabilizacoes_client.reprocessar
+    com lote_id e data_batch
+  → deve UPDATE COD_PSST = 2
+  → deve retornar VALIDACAO_COM_SUCESSO
+
+- test_processar_reprocessamento_count_nao_bate
+  → deve chamar contabilizacoes_client.reprocessar
+    com lote_id e data_batch
+  → deve UPDATE COD_PSST = 3
+  → deve retornar VALIDACAO_COM_FALHA
+
+- test_processar_lote_nao_encontrado
+  → lote_id nao existe no banco
+  → deve lancar excecao
 
 Usar mocks para RdsClient e ContabilizacoesClient.
 
@@ -256,6 +303,6 @@ Usar mocks para RdsClient e ContabilizacoesClient.
 - @dataclass para todos os models
 - Nunca usar print() — sempre logger
 - Tipos anotados em todos os métodos
-- try/except com log antes de relançar exceção
+- try/except com log antes de relancar excecao
 - Seguir estrutura de pastas já existente
 - Imports organizados: stdlib → third party → internal
