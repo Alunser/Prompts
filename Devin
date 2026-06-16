@@ -1,4 +1,255 @@
-definition_column_table_settings: '[{ "column_name": "cod_exto_grup_csrc", "column_type": "int", "column_comment": "Identificador Grupo" }, { "column_name": "cod_exto_copl_grup_csrc", "column_type": "string", "column_comment": "Codigo Grupo" }, { "column_name": "cod_exto_situ_grup_csrc", "column_type": "string", "column_comment": "Codigo Situacao Grupo" }, { "column_name": "nom_situ_grup_csrc", "column_type": "string", "column_comment": "Nome Situacao Grupo" }, { "column_name": "dat_hor_inio_even_asse_csrc", "column_type": "timestamp", "column_comment": "Data Assembleia Constituicao" }]'
+## Contexto
+Realizar ajustes na Lambda ProcessarLote do projeto
+itau-fx9-app-plat-cont-val-conc-ctb-lbd conforme
+alterações abaixo.
+
+---
+
+## 1. models/enums.py — simplificar e renomear
+
+Substituir o conteúdo COMPLETO por:
+
+```python
+from enum import Enum
 
 
-[{ "column_name": "id_conct007a", "column_type": "bigint", "column_comment": "Identificador Saldo Conta" }, { "column_name": "cod_unic", "column_type": "string", "column_comment": "Codigo Unico" }, { "column_name": "dat_hor_rfrc_psst", "column_type": "timestamp", "column_comment": "Data Hora Referencia Processamento" }, { "column_name": "dat_lanc", "column_type": "timestamp", "column_comment": "Data Lancamento" }, { "column_name": "sig_orig", "column_type": "string", "column_comment": "Sigla Origem" }, { "column_name": "idt_grup", "column_type": "bigint", "column_comment": "Identificador Grupo" }, { "column_name": "num_grup", "column_type": "string", "column_comment": "Numero Grupo" }, { "column_name": "cod_situ_grup", "column_type": "string", "column_comment": "Codigo Situacao Grupo" }, { "column_name": "cod_prod", "column_type": "string", "column_comment": "Codigo Produto" }, { "column_name": "cod_empr", "column_type": "string", "column_comment": "Codigo Empresa" }, { "column_name": "cod_tipo_empr", "column_type": "string", "column_comment": "Codigo Tipo Empresa" }, { "column_name": "cod_ctrl_sald", "column_type": "string", "column_comment": "Codigo Controle Saldo" }, { "column_name": "idt_cont_ctbl", "column_type": "bigint", "column_comment": "Identificador Conta Contabil" }, { "column_name": "cod_cont_ctbl", "column_type": "string", "column_comment": "Codigo Conta Contabil" }, { "column_name": "nom_cont_ctbl", "column_type": "string", "column_comment": "Nome Conta Contabil" }, { "column_name": "cod_crtr", "column_type": "string", "column_comment": "Codigo Carteira" }, { "column_name": "vlr_debt", "column_type": "decimal", "column_comment": "Valor Debito" }, { "column_name": "vlr_cred", "column_type": "decimal", "column_comment": "Valor Credito" }]
+class TipoProcessamento(str, Enum):
+    NORMAL = "normal"
+    REPROCESSAMENTO = "reprocessamento"
+
+
+class StatusProcessamento(int, Enum):
+    EM_PROCESSAMENTO       = 0
+    PROCESSAMENTO_VALIDADO = 1
+    VALIDACAO_COM_SUCESSO  = 2
+    VALIDACAO_COM_FALHA    = 3
+```
+
+Motivo:
+- Remover CodProcessamento — era duplicata de StatusProcessamento
+- Renomear CodProcessamento para StatusProcessamento
+- Remover a versão string de StatusProcessamento
+- StatusProcessamento agora é int, Enum com os 4 valores reais
+
+---
+
+## 2. models/lote_input.py — adicionar campos
+
+Substituir por:
+
+```python
+from dataclasses import dataclass
+from src.models.enums import TipoProcessamento
+
+
+@dataclass
+class LoteInput:
+    lote_id: str
+    data_batch: str
+    quantidade_total: int
+    tipo: TipoProcessamento
+
+    @classmethod
+    def from_event(cls, event: dict) -> "LoteInput":
+        return cls(
+            lote_id=event["lote_id"],
+            data_batch=event["data_batch"],
+            quantidade_total=int(event["quantidade_total"]),
+            tipo=TipoProcessamento(event["tipo"]),
+        )
+```
+
+---
+
+## 3. services/lote_service.py — dupla validação
+
+Substituir a implementação COMPLETA do método processar por:
+
+```python
+def processar(self, input_data: LoteInput) -> LoteResponse:
+
+    if input_data.tipo == TipoProcessamento.REPROCESSAMENTO:
+        logger.info(
+            "Reprocessamento solicitado",
+            extra={
+                "lote_id": input_data.lote_id,
+                "data_batch": input_data.data_batch,
+            }
+        )
+        self.contabilizacoes_client.reprocessar(
+            lote_id=input_data.lote_id,
+            data_batch=input_data.data_batch,
+        )
+
+    # 1º check — input vs banco
+    total_banco = self.repo.buscar_total_esperado(
+        input_data.lote_id
+    )
+
+    if input_data.quantidade_total != total_banco:
+        logger.error(
+            "Divergencia entre quantidade_total do input e banco",
+            extra={
+                "lote_id": input_data.lote_id,
+                "quantidade_total_input": input_data.quantidade_total,
+                "quantidade_total_banco": total_banco,
+            }
+        )
+        self.repo.atualizar_status(
+            input_data.lote_id,
+            StatusProcessamento.VALIDACAO_COM_FALHA,
+        )
+        return LoteResponse(
+            status=StatusProcessamento.VALIDACAO_COM_FALHA.value,
+            lote_id=input_data.lote_id,
+        )
+
+    # 2º check — COUNT(*) vs quantidade_total
+    total_inserido = self.repo.contar_movimentos(
+        input_data.lote_id
+    )
+
+    logger.info(
+        "Verificando contagem do lote",
+        extra={
+            "lote_id": input_data.lote_id,
+            "data_batch": input_data.data_batch,
+            "quantidade_total_input": input_data.quantidade_total,
+            "quantidade_total_banco": total_banco,
+            "total_inserido": total_inserido,
+        }
+    )
+
+    if total_inserido == input_data.quantidade_total:
+        self.repo.atualizar_status(
+            input_data.lote_id,
+            StatusProcessamento.VALIDACAO_COM_SUCESSO,
+        )
+        return LoteResponse(
+            status=StatusProcessamento.VALIDACAO_COM_SUCESSO.value,
+            lote_id=input_data.lote_id,
+        )
+
+    self.repo.atualizar_status(
+        input_data.lote_id,
+        StatusProcessamento.VALIDACAO_COM_FALHA,
+    )
+    return LoteResponse(
+        status=StatusProcessamento.VALIDACAO_COM_FALHA.value,
+        lote_id=input_data.lote_id,
+    )
+```
+
+Atualizar imports do lote_service.py:
+```python
+from src.models.enums import StatusProcessamento, TipoProcessamento
+```
+
+---
+
+## 4. repositories/lote_repository.py — manter buscar_total_esperado
+
+Manter os três métodos:
+- buscar_total_esperado(lote_id: str) -> int
+- contar_movimentos(lote_id: str) -> int
+- atualizar_status(lote_id: str, status: StatusProcessamento) -> None
+
+Atualizar import:
+```python
+# Trocar
+from src.models.enums import CodProcessamento
+# Por
+from src.models.enums import StatusProcessamento
+```
+
+Atualizar tipo do parametro status:
+```python
+# Trocar
+def atualizar_status(self, lote_id: str, status: CodProcessamento) -> None:
+# Por
+def atualizar_status(self, lote_id: str, status: StatusProcessamento) -> None:
+```
+
+---
+
+## 5. constants.py — manter SQL_BUSCAR_TOTAL_ESPERADO
+
+Manter todos os SQLs:
+```python
+SQL_BUSCAR_TOTAL_ESPERADO  # ← manter, usado na dupla validação
+SQL_CONTAR_MOVIMENTOS
+SQL_ATUALIZAR_STATUS
+```
+
+---
+
+## 6. Testes — atualizar e adicionar
+
+### Atualizar testes existentes
+
+Todos os testes devem:
+- Usar StatusProcessamento no lugar de CodProcessamento
+- Passar quantidade_total no LoteInput
+
+```python
+input_data = LoteInput(
+    lote_id="abc-123",
+    data_batch="2024-01-15",
+    quantidade_total=700000,
+    tipo=TipoProcessamento.NORMAL,
+)
+```
+
+### Testes a implementar
+
+**test_processar_normal_count_bate**
+→ quantidade_total input == total_banco == total_inserido
+→ deve UPDATE StatusProcessamento.VALIDACAO_COM_SUCESSO (2)
+→ deve retornar status = 2
+
+**test_processar_normal_count_nao_bate**
+→ quantidade_total input == total_banco
+→ total_inserido != quantidade_total
+→ deve UPDATE StatusProcessamento.VALIDACAO_COM_FALHA (3)
+→ deve retornar status = 3
+
+**test_processar_divergencia_input_vs_banco**
+→ quantidade_total input != total_banco
+→ deve UPDATE StatusProcessamento.VALIDACAO_COM_FALHA (3)
+→ deve retornar status = 3 imediatamente
+→ NAO deve chamar contar_movimentos
+
+**test_processar_reprocessamento_count_bate**
+→ tipo = REPROCESSAMENTO
+→ deve chamar contabilizacoes_client.reprocessar
+  com lote_id e data_batch
+→ quantidade_total input == total_banco == total_inserido
+→ deve UPDATE StatusProcessamento.VALIDACAO_COM_SUCESSO (2)
+→ deve retornar status = 2
+
+**test_processar_reprocessamento_count_nao_bate**
+→ tipo = REPROCESSAMENTO
+→ deve chamar contabilizacoes_client.reprocessar
+→ total_inserido != quantidade_total
+→ deve UPDATE StatusProcessamento.VALIDACAO_COM_FALHA (3)
+→ deve retornar status = 3
+
+**test_processar_lote_nao_encontrado**
+→ buscar_total_esperado lanca ValueError
+→ deve propagar excecao
+
+Usar mocks para RdsClient e ContabilizacoesClient.
+
+---
+
+## Padrões obrigatórios
+- logger = logging.getLogger(__name__) em todos os arquivos
+- @dataclass para todos os models
+- Nunca usar print() — sempre logger
+- Tipos anotados em todos os métodos
+- try/except com log antes de relancar excecao
+- Seguir estrutura de pastas já existente
+- Imports organizados: stdlib → third party → internal
+
+Resumo das mudanças
+O que mudouMotivoCodProcessamento removidoRenomeado para StatusProcessamentoStatusProcessamento é int, EnumGrava inteiro no bancoquantidade_total no inputPrimeira camada de validaçãobuscar_total_esperado mantidoSegunda camada — compara input vs bancocontar_movimentos mantidoTerceira camada — compara COUNT vs bancoNovo teste divergencia_input_vs_bancoCobre o novo check
