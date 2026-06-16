@@ -5,7 +5,7 @@ alterações abaixo.
 
 ---
 
-## 1. models/enums.py — simplificar e renomear
+## 1. models/enums.py
 
 Substituir o conteúdo COMPLETO por:
 
@@ -19,23 +19,16 @@ class TipoProcessamento(str, Enum):
 
 
 class StatusProcessamento(int, Enum):
-    EM_PROCESSAMENTO       = 0
-    PROCESSAMENTO_VALIDADO = 1
-    VALIDACAO_COM_SUCESSO  = 2
-    VALIDACAO_COM_FALHA    = 3
+    EM_PROCESSAMENTO           = 0
+    PROCESSAMENTO_VALIDADO     = 1
+    VALIDACAO_COM_SUCESSO      = 2
+    VALIDACAO_COM_FALHA        = 3
+    AGUARDANDO_REPROCESSAMENTO = 4
 ```
-
-Motivo:
-- Remover CodProcessamento — era duplicata de StatusProcessamento
-- Renomear CodProcessamento para StatusProcessamento
-- Remover a versão string de StatusProcessamento
-- StatusProcessamento agora é int, Enum com os 4 valores reais
 
 ---
 
-## 2. models/lote_input.py — adicionar campos
-
-Substituir por:
+## 2. models/lote_input.py
 
 ```python
 from dataclasses import dataclass
@@ -61,184 +54,398 @@ class LoteInput:
 
 ---
 
-## 3. services/lote_service.py — dupla validação
-
-Substituir a implementação COMPLETA do método processar por:
+## 3. models/lote_response.py
 
 ```python
-def processar(self, input_data: LoteInput) -> LoteResponse:
+from dataclasses import dataclass, asdict
 
-    if input_data.tipo == TipoProcessamento.REPROCESSAMENTO:
+
+@dataclass
+class LoteResponse:
+    status: int
+    lote_id: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+```
+
+---
+
+## 4. services/lote_service.py
+
+Substituir implementação COMPLETA por:
+
+```python
+import logging
+
+from src.clients.external.contabilizacoes_client import ContabilizacoesClient
+from src.models.enums import StatusProcessamento, TipoProcessamento
+from src.models.lote_input import LoteInput
+from src.models.lote_response import LoteResponse
+from src.repositories.lote_repository import LoteRepository
+
+logger = logging.getLogger(__name__)
+
+
+class LoteService:
+    def __init__(
+        self,
+        repo: LoteRepository,
+        contabilizacoes_client: ContabilizacoesClient,
+    ) -> None:
+        self.repo = repo
+        self.contabilizacoes_client = contabilizacoes_client
+
+    def processar(self, input_data: LoteInput) -> LoteResponse:
+        if input_data.tipo == TipoProcessamento.REPROCESSAMENTO:
+            return self._disparar_reprocessamento(input_data)
+        return self._validar_lote(input_data)
+
+    def _disparar_reprocessamento(
+        self, input_data: LoteInput
+    ) -> LoteResponse:
         logger.info(
-            "Reprocessamento solicitado",
+            "Disparando reprocessamento",
             extra={
                 "lote_id": input_data.lote_id,
                 "data_batch": input_data.data_batch,
-            }
+            },
         )
         self.contabilizacoes_client.reprocessar(
             lote_id=input_data.lote_id,
             data_batch=input_data.data_batch,
         )
+        return self._criar_resposta(
+            input_data.lote_id,
+            StatusProcessamento.AGUARDANDO_REPROCESSAMENTO,
+        )
 
-    # 1º check — input vs banco
-    total_banco = self.repo.buscar_total_esperado(
-        input_data.lote_id
-    )
+    def _validar_lote(self, input_data: LoteInput) -> LoteResponse:
+        total_banco = self.repo.buscar_total_esperado(input_data.lote_id)
+        total_inserido = self.repo.contar_movimentos(input_data.lote_id)
 
-    if input_data.quantidade_total != total_banco:
-        logger.error(
-            "Divergencia entre quantidade_total do input e banco",
+        logger.info(
+            "Validando lote",
             extra={
                 "lote_id": input_data.lote_id,
                 "quantidade_total_input": input_data.quantidade_total,
                 "quantidade_total_banco": total_banco,
-            }
+                "total_inserido": total_inserido,
+            },
         )
-        self.repo.atualizar_status(
-            input_data.lote_id,
-            StatusProcessamento.VALIDACAO_COM_FALHA,
+
+        validacao_ok = (
+            input_data.quantidade_total == total_banco
+            and total_inserido == input_data.quantidade_total
+        )
+
+        status = (
+            StatusProcessamento.VALIDACAO_COM_SUCESSO
+            if validacao_ok
+            else StatusProcessamento.VALIDACAO_COM_FALHA
+        )
+
+        return self._criar_resposta(input_data.lote_id, status)
+
+    def _criar_resposta(
+        self,
+        lote_id: str,
+        status: StatusProcessamento,
+    ) -> LoteResponse:
+        self.repo.atualizar_status(lote_id, status)
+        logger.info(
+            "Status do lote atualizado",
+            extra={
+                "lote_id": lote_id,
+                "status": status.name,
+                "codigo": status.value,
+            },
         )
         return LoteResponse(
-            status=StatusProcessamento.VALIDACAO_COM_FALHA.value,
-            lote_id=input_data.lote_id,
+            status=status.value,
+            lote_id=lote_id,
         )
-
-    # 2º check — COUNT(*) vs quantidade_total
-    total_inserido = self.repo.contar_movimentos(
-        input_data.lote_id
-    )
-
-    logger.info(
-        "Verificando contagem do lote",
-        extra={
-            "lote_id": input_data.lote_id,
-            "data_batch": input_data.data_batch,
-            "quantidade_total_input": input_data.quantidade_total,
-            "quantidade_total_banco": total_banco,
-            "total_inserido": total_inserido,
-        }
-    )
-
-    if total_inserido == input_data.quantidade_total:
-        self.repo.atualizar_status(
-            input_data.lote_id,
-            StatusProcessamento.VALIDACAO_COM_SUCESSO,
-        )
-        return LoteResponse(
-            status=StatusProcessamento.VALIDACAO_COM_SUCESSO.value,
-            lote_id=input_data.lote_id,
-        )
-
-    self.repo.atualizar_status(
-        input_data.lote_id,
-        StatusProcessamento.VALIDACAO_COM_FALHA,
-    )
-    return LoteResponse(
-        status=StatusProcessamento.VALIDACAO_COM_FALHA.value,
-        lote_id=input_data.lote_id,
-    )
-```
-
-Atualizar imports do lote_service.py:
-```python
-from src.models.enums import StatusProcessamento, TipoProcessamento
 ```
 
 ---
 
-## 4. repositories/lote_repository.py — manter buscar_total_esperado
+## 5. repositories/lote_repository.py
 
-Manter os três métodos:
-- buscar_total_esperado(lote_id: str) -> int
-- contar_movimentos(lote_id: str) -> int
-- atualizar_status(lote_id: str, status: StatusProcessamento) -> None
-
-Atualizar import:
 ```python
-# Trocar
-from src.models.enums import CodProcessamento
-# Por
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
 from src.models.enums import StatusProcessamento
-```
+from src.utils.constants import (
+    SQL_ATUALIZAR_STATUS,
+    SQL_BUSCAR_TOTAL_ESPERADO,
+    SQL_CONTAR_MOVIMENTOS,
+)
 
-Atualizar tipo do parametro status:
-```python
-# Trocar
-def atualizar_status(self, lote_id: str, status: CodProcessamento) -> None:
-# Por
-def atualizar_status(self, lote_id: str, status: StatusProcessamento) -> None:
+if TYPE_CHECKING:
+    import pymysql
+
+logger = logging.getLogger(__name__)
+
+
+class LoteRepository:
+    def __init__(self, connection: pymysql.Connection) -> None:
+        self.connection = connection
+
+    def buscar_total_esperado(self, lote_id: str) -> int:
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(SQL_BUSCAR_TOTAL_ESPERADO, (lote_id,))
+                row = cursor.fetchone()
+
+            if row is None:
+                raise ValueError(f"Lote nao encontrado: {lote_id}")
+
+            return row["total_esperado"]
+
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(
+                "Erro ao buscar total esperado",
+                extra={"lote_id": lote_id, "erro": str(e)},
+            )
+            raise
+
+    def contar_movimentos(self, lote_id: str) -> int:
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(SQL_CONTAR_MOVIMENTOS, (lote_id,))
+                row = cursor.fetchone()
+
+            return row["total"] if row else 0
+
+        except Exception as e:
+            logger.error(
+                "Erro ao contar movimentos",
+                extra={"lote_id": lote_id, "erro": str(e)},
+            )
+            raise
+
+    def atualizar_status(
+        self,
+        lote_id: str,
+        status: StatusProcessamento,
+    ) -> None:
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    SQL_ATUALIZAR_STATUS,
+                    (status.value, lote_id),
+                )
+            self.connection.commit()
+
+        except Exception as e:
+            logger.error(
+                "Erro ao atualizar status do lote",
+                extra={
+                    "lote_id": lote_id,
+                    "status": status.name,
+                    "erro": str(e),
+                },
+            )
+            raise
 ```
 
 ---
 
-## 5. constants.py — manter SQL_BUSCAR_TOTAL_ESPERADO
-
-Manter todos os SQLs:
-```python
-SQL_BUSCAR_TOTAL_ESPERADO  # ← manter, usado na dupla validação
-SQL_CONTAR_MOVIMENTOS
-SQL_ATUALIZAR_STATUS
-```
-
----
-
-## 6. Testes — atualizar e adicionar
-
-### Atualizar testes existentes
-
-Todos os testes devem:
-- Usar StatusProcessamento no lugar de CodProcessamento
-- Passar quantidade_total no LoteInput
+## 6. constants.py
 
 ```python
-input_data = LoteInput(
-    lote_id="abc-123",
-    data_batch="2024-01-15",
-    quantidade_total=700000,
-    tipo=TipoProcessamento.NORMAL,
+SQL_BUSCAR_TOTAL_ESPERADO = (
+    "SELECT QTD_TOTL AS total_esperado "
+    "FROM CTRL_LOTE_MOVI_CTB "
+    "WHERE COD_UNIC_LOTE = %s"
+)
+
+SQL_CONTAR_MOVIMENTOS = (
+    "SELECT COUNT(*) AS total "
+    "FROM SALD_CONT_CTBL_MLTO "
+    "WHERE COD_UNIC = %s"
+)
+
+SQL_ATUALIZAR_STATUS = (
+    "UPDATE CTRL_LOTE_MOVI_CTB "
+    "SET COD_PSST = %s, DAT_ATUI = NOW() "
+    "WHERE COD_UNIC_LOTE = %s"
 )
 ```
 
-### Testes a implementar
+---
 
-**test_processar_normal_count_bate**
-→ quantidade_total input == total_banco == total_inserido
-→ deve UPDATE StatusProcessamento.VALIDACAO_COM_SUCESSO (2)
-→ deve retornar status = 2
+## 7. handlers/orchestration.py
 
-**test_processar_normal_count_nao_bate**
-→ quantidade_total input == total_banco
-→ total_inserido != quantidade_total
-→ deve UPDATE StatusProcessamento.VALIDACAO_COM_FALHA (3)
-→ deve retornar status = 3
+```python
+import logging
 
-**test_processar_divergencia_input_vs_banco**
-→ quantidade_total input != total_banco
-→ deve UPDATE StatusProcessamento.VALIDACAO_COM_FALHA (3)
-→ deve retornar status = 3 imediatamente
-→ NAO deve chamar contar_movimentos
+from src.handlers.dependencies import Dependencies
+from src.models.lote_input import LoteInput
+from src.repositories.lote_repository import LoteRepository
+from src.services.lote_service import LoteService
+from src.utils.constants import LOG_INICIO, LOG_SUCESSO
+from src.utils.logger import setup_logger
 
-**test_processar_reprocessamento_count_bate**
-→ tipo = REPROCESSAMENTO
-→ deve chamar contabilizacoes_client.reprocessar
-  com lote_id e data_batch
-→ quantidade_total input == total_banco == total_inserido
-→ deve UPDATE StatusProcessamento.VALIDACAO_COM_SUCESSO (2)
-→ deve retornar status = 2
+logger = setup_logger(__name__)
 
-**test_processar_reprocessamento_count_nao_bate**
-→ tipo = REPROCESSAMENTO
-→ deve chamar contabilizacoes_client.reprocessar
-→ total_inserido != quantidade_total
-→ deve UPDATE StatusProcessamento.VALIDACAO_COM_FALHA (3)
-→ deve retornar status = 3
 
-**test_processar_lote_nao_encontrado**
-→ buscar_total_esperado lanca ValueError
-→ deve propagar excecao
+def handler(event: dict, context) -> dict:
+    logger.info(
+        LOG_INICIO.format(lote_id=event.get("lote_id"))
+    )
 
-Usar mocks para RdsClient e ContabilizacoesClient.
+    input_data = LoteInput.from_event(event)
+    deps = Dependencies.build()
+
+    try:
+        conn = deps.rds_client.get_connection()
+        repo = LoteRepository(conn)
+        service = LoteService(
+            repo=repo,
+            contabilizacoes_client=deps.contabilizacoes_client,
+        )
+        result = service.processar(input_data)
+    finally:
+        deps.rds_client.close()
+
+    logger.info(LOG_SUCESSO)
+    return result.to_dict()
+
+
+class LoteOrquestration:
+    def execute(self, event: dict, context: dict) -> dict:
+        return handler(event, None)
+```
+
+---
+
+## 8. Testes — tests/src/
+
+```python
+import pytest
+from unittest.mock import MagicMock
+
+from src.models.enums import StatusProcessamento, TipoProcessamento
+from src.models.lote_input import LoteInput
+from src.services.lote_service import LoteService
+
+
+@pytest.fixture
+def repo():
+    return MagicMock()
+
+
+@pytest.fixture
+def contabilizacoes_client():
+    return MagicMock()
+
+
+@pytest.fixture
+def service(repo, contabilizacoes_client):
+    return LoteService(
+        repo=repo,
+        contabilizacoes_client=contabilizacoes_client,
+    )
+
+
+@pytest.fixture
+def input_normal():
+    return LoteInput(
+        lote_id="abc-123",
+        data_batch="2024-01-15",
+        quantidade_total=700000,
+        tipo=TipoProcessamento.NORMAL,
+    )
+
+
+@pytest.fixture
+def input_reprocessamento():
+    return LoteInput(
+        lote_id="abc-123",
+        data_batch="2024-01-15",
+        quantidade_total=700000,
+        tipo=TipoProcessamento.REPROCESSAMENTO,
+    )
+
+
+def test_reprocessamento_dispara_api_e_aguarda(
+    service, repo, contabilizacoes_client, input_reprocessamento
+):
+    result = service.processar(input_reprocessamento)
+
+    contabilizacoes_client.reprocessar.assert_called_once_with(
+        lote_id="abc-123",
+        data_batch="2024-01-15",
+    )
+    repo.atualizar_status.assert_called_once_with(
+        "abc-123",
+        StatusProcessamento.AGUARDANDO_REPROCESSAMENTO,
+    )
+    repo.buscar_total_esperado.assert_not_called()
+    repo.contar_movimentos.assert_not_called()
+    assert result.status == StatusProcessamento.AGUARDANDO_REPROCESSAMENTO.value
+
+
+def test_normal_validacao_com_sucesso(
+    service, repo, input_normal
+):
+    repo.buscar_total_esperado.return_value = 700000
+    repo.contar_movimentos.return_value = 700000
+
+    result = service.processar(input_normal)
+
+    repo.atualizar_status.assert_called_once_with(
+        "abc-123",
+        StatusProcessamento.VALIDACAO_COM_SUCESSO,
+    )
+    assert result.status == StatusProcessamento.VALIDACAO_COM_SUCESSO.value
+
+
+def test_normal_divergencia_input_vs_banco(
+    service, repo, input_normal
+):
+    repo.buscar_total_esperado.return_value = 650000
+
+    result = service.processar(input_normal)
+
+    repo.atualizar_status.assert_called_once_with(
+        "abc-123",
+        StatusProcessamento.VALIDACAO_COM_FALHA,
+    )
+    assert result.status == StatusProcessamento.VALIDACAO_COM_FALHA.value
+
+
+def test_normal_count_diverge_do_esperado(
+    service, repo, input_normal
+):
+    repo.buscar_total_esperado.return_value = 700000
+    repo.contar_movimentos.return_value = 699990
+
+    result = service.processar(input_normal)
+
+    repo.atualizar_status.assert_called_once_with(
+        "abc-123",
+        StatusProcessamento.VALIDACAO_COM_FALHA,
+    )
+    assert result.status == StatusProcessamento.VALIDACAO_COM_FALHA.value
+
+
+def test_normal_lote_nao_encontrado(
+    service, repo, input_normal
+):
+    repo.buscar_total_esperado.side_effect = ValueError(
+        "Lote nao encontrado: abc-123"
+    )
+
+    with pytest.raises(ValueError):
+        service.processar(input_normal)
+```
 
 ---
 
@@ -250,6 +457,3 @@ Usar mocks para RdsClient e ContabilizacoesClient.
 - try/except com log antes de relancar excecao
 - Seguir estrutura de pastas já existente
 - Imports organizados: stdlib → third party → internal
-
-Resumo das mudanças
-O que mudouMotivoCodProcessamento removidoRenomeado para StatusProcessamentoStatusProcessamento é int, EnumGrava inteiro no bancoquantidade_total no inputPrimeira camada de validaçãobuscar_total_esperado mantidoSegunda camada — compara input vs bancocontar_movimentos mantidoTerceira camada — compara COUNT vs bancoNovo teste divergencia_input_vs_bancoCobre o novo check
