@@ -1,143 +1,261 @@
-Prompt Devin — Implementar RdsClient
+## Contexto
+Você está ajustando e implementando a Lambda Python chamada
+ProcessarLote dentro do projeto itau-fx9-app-plat-cont-val-conc-ctb-lbd.
 
-Objetivo
+Essa Lambda é acionada pelo AWS Step Functions e é responsável
+por orquestrar o encerramento de um lote de processamento.
 
-Implementar o app/src/clients/aws/rds_client.py seguindo o padrão da codebase.
+## LIMPEZA PRIMEIRO — remover implementações anteriores
 
+### 1. models/enums.py
+Substituir o conteúdo COMPLETO por:
 
-Referência — como estava na Lambda de referência
+```python
+from enum import Enum
 
-pythonclass RdsClient:
-    """
-    O client é a camada que comunica com o RDS MySQL.
-    """
-    def __init__(self):
-        rds_endpoint = SecretManagerClient.get_secret(RDS_SERVER)
-        self.host, self.port = parse_endpoint(rds_endpoint, default_port=3306)
-        self.database = RDS_DATABASE
-        self.user = SecretManagerClient.get_secret(RDS_USERNAME)
-        self.password = SecretManagerClient.get_secret(RDS_PASSWORD)
-        self._connection = None
+class TipoProcessamento(str, Enum):
+    NORMAL = "normal"
+    REPROCESSAMENTO = "reprocessamento"
 
-    def _get_connection(self):
-        if self._connection is None or not self._connection.open:
-            try:
-                self._connection = pymysql.connect(
-                    host=self.host,
-                    port=self.port,
-                    user=self.user,
-                    password=self.password,
-                    database=self.database,
-                    cursorclass=pymysql.cursors.DictCursor,  # ← usar DictCursor (melhoria)
-                    autocommit=False,
-                )
-                logger.info("Conexão RDS estabelecida com sucesso")
-            except UnicodeError as e:
-                logger.error("Erro de hostname inválido ao conectar ao RDS: %s", e)
-                raise InvalidEndpointError(
-                    f"Hostname inválido para conexão RDS: {self.host}"
-                ) from e
-        return self._connection
+class StatusProcessamento(str, Enum):
+    PENDENTE = "pendente"
+    VALIDADO = "validado"
+```
 
+Motivo: StatusEvento foi removido pois não existe mais
+lote_erros na arquitetura. TipoProcessamento.ENVIO foi
+renomeado para NORMAL.
 
-O que implementar
+### 2. services/lote_service.py
+Remover toda a implementação atual e substituir
+pela nova implementação descrita abaixo.
 
-app/src/clients/aws/rds_client.py
+### 3. repositories/
+Remover qualquer repository que faça referência a:
+- lote_erros
+- ids_com_erro
+- marcar_como_enviado
+- buscar_ids_com_erro
+- EventoRepository
 
-pythonimport logging
-import pymysql
-import pymysql.cursors
+---
 
-from src.clients.aws.secret_manager_client import SecretManagerClient
-from src.utils.constants import RDS_SERVER, RDS_DATABASE, RDS_USERNAME, RDS_PASSWORD
-from src.utils.endpoint_parser import parse_endpoint, InvalidEndpointError
+## Estrutura do projeto — seguir padrão já existente
 
-logger = logging.getLogger(__name__)
+src/
+├── clients/
+│   ├── aws/          → RdsClient, SecretManagerClient
+│   └── external/     → ContabilizacoesClient, StsTokenClient
+├── handlers/
+│   ├── dependencies.py   → Composition Root
+│   └── orchestration.py  → handler da Lambda
+├── models/
+│   ├── enums.py          → conforme acima
+│   ├── lote_input.py
+│   └── lote_response.py
+├── repositories/
+│   └── lote_repository.py
+├── services/
+│   └── lote_service.py
+└── utils/
+    → logger, constants, endpoint_parser
 
+---
 
-class RdsClient:
-    """
-    Camada de conexão com o RDS MySQL.
-    Busca credenciais via SecretManagerClient (com cache).
-    Lazy connection — só conecta quando get_connection() é chamado.
-    """
+## Input da Lambda (enviado pelo Step Functions)
 
-    def __init__(self):
-        # Busca os 3 secrets separados (padrão Itaú)
-        rds_endpoint = SecretManagerClient.get_secret(RDS_SERVER)
-        self.host, self.port = parse_endpoint(rds_endpoint, default_port=3306)
-        self.database = RDS_DATABASE
-        self.user = SecretManagerClient.get_secret(RDS_USERNAME)
-        self.password = SecretManagerClient.get_secret(RDS_PASSWORD)
-        self._connection = None
+```json
+{
+  "lote_id": "abc-123",
+  "tipo": "normal"
+}
+```
 
-    def get_connection(self) -> pymysql.Connection:
-        """
-        Retorna conexão ativa. Reconecta se a conexão estiver fechada.
-        Usa DictCursor para retornar dicionários em vez de tuplas.
-        """
-        if self._connection is None or not self._connection.open:
-            try:
-                self._connection = pymysql.connect(
-                    host=self.host,
-                    port=self.port,
-                    user=self.user,
-                    password=self.password,
-                    database=self.database,
-                    cursorclass=pymysql.cursors.DictCursor,
-                    autocommit=False,
-                )
-                logger.info("Conexão RDS estabelecida com sucesso")
-            except UnicodeError as e:
-                logger.error("Erro de hostname inválido ao conectar ao RDS: %s", e)
-                raise InvalidEndpointError(
-                    f"Hostname inválido para conexão RDS: {self.host}"
-                ) from e
-        return self._connection
+ou
 
-    def close(self) -> None:
-        """Fecha a conexão se estiver aberta."""
-        if self._connection and self._connection.open:
-            self._connection.close()
-            logger.info("Conexão RDS encerrada")
+```json
+{
+  "lote_id": "abc-123",
+  "tipo": "reprocessamento"
+}
+```
 
+---
 
-Atualizar constants.py
+## Regras de negócio
 
-Verificar se as constantes abaixo já existem — se não existirem, adicionar:
+### Se tipo == TipoProcessamento.REPROCESSAMENTO:
+1. Chamar ContabilizacoesClient passando lote_id
+2. A API vai reprocessar o lote completo externamente
+3. Retornar StatusProcessamento.PENDENTE
+   para o Step Functions continuar o loop
 
-python# Database Configuration
-RDS_SERVER = getenv("RDS_SERVER")       # nome do secret com o endpoint
-RDS_DATABASE = getenv("RDS_DATABASE")   # nome do banco
-RDS_USERNAME = getenv("RDS_USERNAME")   # nome do secret com o usuário
-RDS_PASSWORD = getenv("RDS_PASSWORD")   # nome do secret com a senha
+### Se tipo == TipoProcessamento.NORMAL:
+1. Buscar total_esperado em tb_lote_controle
+   WHERE lote_id = input.lote_id
+2. Fazer COUNT(*) em tb_movimentos
+   WHERE lote_id = input.lote_id
+3. Se COUNT(*) == total_esperado:
+   → retornar StatusProcessamento.VALIDADO
+   → Step Functions vai acionar o Glue
+4. Se COUNT(*) != total_esperado:
+   → retornar StatusProcessamento.PENDENTE
+   → Step Functions vai chamar a Lambda novamente
 
+---
 
-Atualizar handlers/orchestration.py
+## Tabelas MySQL (fictícias — serão ajustadas depois)
 
-Substituir o get_connection() standalone pelo RdsClient:
+```sql
+CREATE TABLE tb_lote_controle (
+    lote_controle_id  VARCHAR(36) PRIMARY KEY,
+    lote_id           VARCHAR(36) UNIQUE,
+    data_batch        DATE,
+    total_esperado    INT,
+    status            VARCHAR(20),
+    step_fn_acionado  TINYINT(1) DEFAULT 0,
+    data_criacao      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    data_alteracao    DATETIME DEFAULT CURRENT_TIMESTAMP
+                      ON UPDATE CURRENT_TIMESTAMP
+);
 
-pythonrds_client = RdsClient()
-try:
-    conn = rds_client.get_connection()
-    repo = EventoRepository(conn)
-    service = LoteService(repo=repo, contabilizacoes_client=contabilizacoes_client)
-    result = service.processar(input_data)
-finally:
-    rds_client.close()
+CREATE TABLE tb_movimentos (
+    id_evento    VARCHAR(36) PRIMARY KEY,
+    lote_id      VARCHAR(36),
+    data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
 
+---
 
-Testes — app/tests/src/clients/aws/test_rds_client.py
+## Implementações necessárias
 
-Mockar: SecretManagerClient.get_secret, pymysql.connect
+### models/lote_input.py
+```python
+@dataclass
+class LoteInput:
+    lote_id: str
+    tipo: TipoProcessamento
+```
 
-CenárioO que testarConexão okget_connection() retorna conexão, pymysql.connect chamado com params corretosReconexãose connection.open = False, reconecta automaticamenteCache de conexãosegunda chamada a get_connection() não chama pymysql.connect de novoHostname inválidoUnicodeError levanta InvalidEndpointErrorEndpoint com portahost:3307 → host e porta extraídos corretamenteEndpoint sem portasó host → usa porta default 3306Closeclose() chama connection.close()
+### models/lote_response.py
+```python
+@dataclass
+class LoteResponse:
+    status: StatusProcessamento
+    lote_id: str
+```
 
+### repositories/lote_repository.py
+Implementar dois métodos:
 
-Regras obrigatórias
+- buscar_total_esperado(lote_id: str) -> int
+  → SELECT total_esperado FROM tb_lote_controle
+    WHERE lote_id = :lote_id
 
+- contar_movimentos(lote_id: str) -> int
+  → SELECT COUNT(*) FROM tb_movimentos
+    WHERE lote_id = :lote_id
 
-Usar DictCursor — não Cursor — para retornar dicionários
-autocommit=False — commit explícito no repository
-Secrets via SecretManagerClient.get_secret() — nunca os.environ direto para senha
-Método close() explícito — chamado no finally do handler
+### services/lote_service.py
+```python
+class LoteService:
+    def __init__(
+        self,
+        repo: LoteRepository,
+        contabilizacoes_client: ContabilizacoesClient,
+    ):
+        self.repo = repo
+        self.contabilizacoes_client = contabilizacoes_client
+
+    def processar(self, input_data: LoteInput) -> LoteResponse:
+
+        if input_data.tipo == TipoProcessamento.REPROCESSAMENTO:
+            logger.info(
+                "Reprocessamento solicitado",
+                extra={"lote_id": input_data.lote_id}
+            )
+            self.contabilizacoes_client.reprocessar(
+                lote_id=input_data.lote_id
+            )
+            return LoteResponse(
+                status=StatusProcessamento.PENDENTE,
+                lote_id=input_data.lote_id,
+            )
+
+        total_esperado = self.repo.buscar_total_esperado(
+            input_data.lote_id
+        )
+        total_inserido = self.repo.contar_movimentos(
+            input_data.lote_id
+        )
+
+        logger.info(
+            "Verificando contagem do lote",
+            extra={
+                "lote_id": input_data.lote_id,
+                "total_esperado": total_esperado,
+                "total_inserido": total_inserido,
+            }
+        )
+
+        if total_inserido == total_esperado:
+            return LoteResponse(
+                status=StatusProcessamento.VALIDADO,
+                lote_id=input_data.lote_id,
+            )
+
+        return LoteResponse(
+            status=StatusProcessamento.PENDENTE,
+            lote_id=input_data.lote_id,
+        )
+```
+
+### handlers/dependencies.py
+Atualizar Composition Root:
+- Remover qualquer referência a EventoRepository
+- Adicionar LoteRepository
+- Seguir padrão já existente no arquivo
+
+### handlers/orchestration.py
+Atualizar handler:
+- Receber input do Step Functions
+- Parsear como LoteInput
+- Instanciar Dependencies.build()
+- Chamar LoteService.processar()
+- Retornar LoteResponse como dict
+
+---
+
+## Testes — tests/src/
+
+Criar os seguintes testes unitários:
+
+- test_processar_reprocessamento
+  → deve chamar contabilizacoes_client.reprocessar
+  → deve retornar status PENDENTE
+
+- test_processar_normal_count_bate
+  → total_esperado == total_inserido
+  → deve retornar status VALIDADO
+
+- test_processar_normal_count_nao_bate
+  → total_esperado != total_inserido
+  → deve retornar status PENDENTE
+
+- test_processar_normal_sem_lote
+  → lote_id não encontrado no banco
+  → deve lançar exceção
+
+Usar mocks para RdsClient e ContabilizacoesClient.
+
+---
+
+## Padrões obrigatórios
+- logger = logging.getLogger(__name__) em todos os arquivos
+- @dataclass para todos os models
+- Nunca usar print() — sempre logger
+- Tipos anotados em todos os métodos
+- try/except com log antes de relançar exceção
+- Seguir estrutura de pastas já existente
+- Imports organizados: stdlib → third party → internal
