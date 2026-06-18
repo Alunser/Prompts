@@ -1,101 +1,101 @@
-## Contexto
-Realizar ajuste pontual na Lambda ProcessarLote do projeto
-itau-fx9-app-plat-cont-val-conc-ctb-lbd.
+Tarefa: Corrigir syntax error e adicionar testes unitários no LoteService
+Contexto:
 
-Renomear TipoProcessamento.NORMAL para TipoProcessamento.VALIDACAO
-em todos os arquivos do projeto.
+O arquivo app/src/services/lote_service.py usa match/case (Python 3.10+) mas o ambiente de CI roda Python 3.9, causando SyntaxError na linha 22.
+1. Corrigir app/src/services/lote_service.py
+Substituir o método processar:
+python# ANTES (remover)
+def processar(self, input_data: LoteInput) -> LoteResponse:
+    match input_data.tipo:
+        case TipoProcessamento.REPROCESSAMENTO:
+            return self._disparar_reprocessamento(input_data)
+        case _:
+            return self._validar_lote(input_data)
 
----
+# DEPOIS (inserir)
+def processar(self, input_data: LoteInput) -> LoteResponse:
+    strategies = {
+        TipoProcessamento.VALIDACAO: self._validar_lote,
+        TipoProcessamento.REPROCESSAMENTO: self._disparar_reprocessamento,
+    }
+    strategy = strategies.get(input_data.tipo, self._validar_lote)
+    return strategy(input_data)
+2. Criar tests/src/services/test_lote_service.py
+pythonfrom unittest.mock import MagicMock
+import pytest
 
-## Alterações necessárias
-
-### 1. models/enums.py
-
-Trocar:
-NORMAL = "normal"
-
-Por:
-VALIDACAO = "validacao"
-
-O arquivo completo deve ficar assim:
-
-from enum import Enum
-
-
-class TipoProcessamento(str, Enum):
-    VALIDACAO       = "validacao"
-    REPROCESSAMENTO = "reprocessamento"
+from src.models.enums import TipoProcessamento, StatusProcessamento
+from src.models.lote_input import LoteInput
+from src.services.lote_service import LoteService
 
 
-class StatusProcessamento(str, Enum):
-    VALIDACAO_COM_SUCESSO      = "VALIDACAO_COM_SUCESSO"
-    VALIDACAO_COM_FALHA        = "VALIDACAO_COM_FALHA"
-    AGUARDANDO_REPROCESSAMENTO = "AGUARDANDO_REPROCESSAMENTO"
+def make_input(tipo: TipoProcessamento, quantidade_total: int = 10) -> LoteInput:
+    return LoteInput(
+        lote_id="LOTE-001",
+        data_batch="2026-06-18",
+        quantidade_total=quantidade_total,
+        tipo=tipo,
+    )
 
----
 
-### 2. models/lote_input.py
+@pytest.fixture
+def service():
+    repo = MagicMock()
+    contabilizacoes_client = MagicMock()
+    return LoteService(repo=repo, contabilizacoes_client=contabilizacoes_client)
 
-Trocar na validação do from_event:
-TipoProcessamento("normal")
 
-Por:
-TipoProcessamento("validacao")
+def test_processar_tipo_validacao_chama_validar_lote(service):
+    input_data = make_input(TipoProcessamento.VALIDACAO)
+    service._validar_lote = MagicMock(return_value=MagicMock())
+    service.processar(input_data)
+    service._validar_lote.assert_called_once_with(input_data)
 
----
 
-### 3. services/lote_service.py
+def test_processar_tipo_reprocessamento_chama_disparar(service):
+    input_data = make_input(TipoProcessamento.REPROCESSAMENTO)
+    service._disparar_reprocessamento = MagicMock(return_value=MagicMock())
+    service.processar(input_data)
+    service._disparar_reprocessamento.assert_called_once_with(input_data)
 
-Trocar:
-if input_data.tipo == TipoProcessamento.NORMAL:
 
-Por:
-if input_data.tipo == TipoProcessamento.VALIDACAO:
+def test_validar_lote_sucesso(service):
+    input_data = make_input(TipoProcessamento.VALIDACAO, quantidade_total=5)
+    service.repo.buscar_total_esperado.return_value = 5
+    service.repo.contar_movimentos.return_value = 5
+    service.repo.atualizar_status.return_value = None
+    result = service._validar_lote(input_data)
+    assert result.status == StatusProcessamento.VALIDACAO_COM_SUCESSO.value
 
----
 
-### 4. Testes — todos os arquivos em tests/
+def test_validar_lote_falha_quantidade_banco_diverge(service):
+    input_data = make_input(TipoProcessamento.VALIDACAO, quantidade_total=5)
+    service.repo.buscar_total_esperado.return_value = 9999
+    service.repo.contar_movimentos.return_value = 5
+    service.repo.atualizar_status.return_value = None
+    result = service._validar_lote(input_data)
+    assert result.status == StatusProcessamento.VALIDACAO_COM_FALHA.value
 
-Buscar em todos os arquivos de teste:
-tipo=TipoProcessamento.NORMAL
 
-Substituir por:
-tipo=TipoProcessamento.VALIDACAO
+def test_validar_lote_falha_total_inserido_diverge(service):
+    input_data = make_input(TipoProcessamento.VALIDACAO, quantidade_total=5)
+    service.repo.buscar_total_esperado.return_value = 5
+    service.repo.contar_movimentos.return_value = 3
+    service.repo.atualizar_status.return_value = None
+    result = service._validar_lote(input_data)
+    assert result.status == StatusProcessamento.VALIDACAO_COM_FALHA.value
 
-Buscar também qualquer string literal:
-"tipo": "normal"
 
-Substituir por:
-"tipo": "validacao"
+def test_disparar_reprocessamento_retorna_aguardando(service):
+    input_data = make_input(TipoProcessamento.REPROCESSAMENTO)
+    service.repo.atualizar_status.return_value = None
+    result = service._disparar_reprocessamento(input_data)
+    service.contabilizacoes_client.reprocessar.assert_called_once_with(
+        lote_id=input_data.lote_id,
+        data_batch=input_data.data_batch,
+    )
+    assert result.status == StatusProcessamento.AGUARDANDO_REPROCESSAMENTO.value
+3. Validação
 
----
-
-## Atenção
-
-Fazer busca global no projeto (Ctrl+Shift+F no VS Code)
-pelos termos abaixo para garantir que nenhuma referência
-ficou para trás:
-
-- "NORMAL"
-- "normal"
-- "TipoProcessamento.NORMAL"
-
-Se encontrar qualquer referência a esses termos relacionada
-ao TipoProcessamento, substituir por VALIDACAO/validacao.
-
----
-
-## O que NAO mudar
-
-- JSON do Step Functions — não conhece o TipoProcessamento
-- Nenhum outro enum
-- Nenhuma outra lógica de negócio
-- Estrutura de pastas
-- Demais arquivos do projeto
-
----
-
-## Padrões obrigatórios
-- Após as alterações rodar os testes para garantir que
-  nenhum teste quebrou
-- Confirmar que o coverage continua passando
+Rodar python -m pytest tests/ -v e garantir que todos os testes passam sem erros.
+Não alterar nenhum outro arquivo.
