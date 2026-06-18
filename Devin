@@ -1,1 +1,101 @@
-'[{ "column_name": "dat_contabil", "column_type": "timestamp", "column_comment": "Data Contabil" }, { "column_name": "sigl_orig", "column_type": "string", "column_comment": "Sigla Origem" }, { "column_name": "cod_prod_v9", "column_type": "string", "column_comment": "Codigo Produto V9" }, { "column_name": "cod_empr", "column_type": "string", "column_comment": "Codigo Empresa" }, { "column_name": "cod_tipo_empr", "column_type": "string", "column_comment": "Codigo Tipo Empresa" }, { "column_name": "situ_ctrl_sald", "column_type": "string", "column_comment": "Situacao Controle Saldo" }, { "column_name": "cod_depe_empr", "column_type": "string", "column_comment": "Codigo Dependencia Empresa" }, { "column_name": "cod_cart", "column_type": "string", "column_comment": "Codigo Carteira" }, { "column_name": "nom_cart", "column_type": "string", "column_comment": "Nome Carteira" }, { "column_name": "cod_cont", "column_type": "string", "column_comment": "Codigo Contrato" }, { "column_name": "sald_cart", "column_type": "decimal", "column_comment": "Saldo Carteira" }, { "column_name": "chav_unic", "column_type": "string", "column_comment": "Chave Unicidade" }, { "column_name": "dat_hor_gera", "column_type": "timestamp", "column_comment": "Data Hora Geracao" }]'
+## Contexto
+Realizar ajuste pontual na Lambda ProcessarLote do projeto
+itau-fx9-app-plat-cont-val-conc-ctb-lbd.
+
+Renomear TipoProcessamento.NORMAL para TipoProcessamento.VALIDACAO
+em todos os arquivos do projeto.
+
+---
+
+## Alterações necessárias
+
+### 1. models/enums.py
+
+Trocar:
+NORMAL = "normal"
+
+Por:
+VALIDACAO = "validacao"
+
+O arquivo completo deve ficar assim:
+
+from enum import Enum
+
+
+class TipoProcessamento(str, Enum):
+    VALIDACAO       = "validacao"
+    REPROCESSAMENTO = "reprocessamento"
+
+
+class StatusProcessamento(str, Enum):
+    VALIDACAO_COM_SUCESSO      = "VALIDACAO_COM_SUCESSO"
+    VALIDACAO_COM_FALHA        = "VALIDACAO_COM_FALHA"
+    AGUARDANDO_REPROCESSAMENTO = "AGUARDANDO_REPROCESSAMENTO"
+
+---
+
+### 2. models/lote_input.py
+
+Trocar na validação do from_event:
+TipoProcessamento("normal")
+
+Por:
+TipoProcessamento("validacao")
+
+---
+
+### 3. services/lote_service.py
+
+Trocar:
+if input_data.tipo == TipoProcessamento.NORMAL:
+
+Por:
+if input_data.tipo == TipoProcessamento.VALIDACAO:
+
+---
+
+### 4. Testes — todos os arquivos em tests/
+
+Buscar em todos os arquivos de teste:
+tipo=TipoProcessamento.NORMAL
+
+Substituir por:
+tipo=TipoProcessamento.VALIDACAO
+
+Buscar também qualquer string literal:
+"tipo": "normal"
+
+Substituir por:
+"tipo": "validacao"
+
+---
+
+## Atenção
+
+Fazer busca global no projeto (Ctrl+Shift+F no VS Code)
+pelos termos abaixo para garantir que nenhuma referência
+ficou para trás:
+
+- "NORMAL"
+- "normal"
+- "TipoProcessamento.NORMAL"
+
+Se encontrar qualquer referência a esses termos relacionada
+ao TipoProcessamento, substituir por VALIDACAO/validacao.
+
+---
+
+## O que NAO mudar
+
+- JSON do Step Functions — não conhece o TipoProcessamento
+- Nenhum outro enum
+- Nenhuma outra lógica de negócio
+- Estrutura de pastas
+- Demais arquivos do projeto
+
+---
+
+## Padrões obrigatórios
+- Após as alterações rodar os testes para garantir que
+  nenhum teste quebrou
+- Confirmar que o coverage continua passando
