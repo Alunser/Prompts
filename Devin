@@ -1,52 +1,136 @@
 Tarefa: Paralelizar processamento de contabilização (UA2.Consorcio)
 
+Pré-requisito: Branches Git
+
+Antes de iniciar qualquer alteração, criar as duas branches a partir da develop:
+
+bashgit checkout develop
+git pull origin develop
+
+# Branch pai — não desenvolver aqui
+git checkout -b feature/melhorias_performaces
+git push origin feature/melhorias_performaces
+
+# Branch de trabalho — todo o desenvolvimento acontece aqui
+git checkout -b feature/codificacao_performance
+git push origin feature/codificacao_performance
+
+
+⚠️ Todo o desenvolvimento deve ser feito na branch feature/codificacao_performance.
+Ao finalizar, abrir PR de feature/codificacao_performance → feature/melhorias_performaces.
+Não abrir PR direto para develop ou main.
+
+
+
+
 Contexto e cuidados
 
 Esta aplicação já está em produção e estável. A mudança deve ser cirúrgica:
 
 
-✅ Criar um serviço novo
-✅ Simplificar os dois handlers existentes
-✅ Adicionar dois métodos novos no repositório
-❌ NÃO tocar no Controller
-❌ NÃO tocar no Worker
-❌ NÃO tocar no ProcessoContabilizacaoService (exceto o TryPublishWithRetry)
+✅ Criar um serviço novo ContabilizacaoDisponibilizacaoService
+✅ Simplificar os dois handlers — apenas substituir o while(true) por chamada ao serviço
+✅ Adicionar query ObterPorOffset e método ObterPorOffsetAsync no repositório
+❌ NÃO tocar no ContabilizacoesController.cs
+❌ NÃO tocar no ContabilizacaoNewconWorker.cs
+❌ NÃO tocar no ProcessoContabilizacaoService.cs (exceto TryPublishWithRetry → async)
 ❌ NÃO alterar nenhum Command existente
-❌ NÃO alterar interfaces já existentes — apenas adicionar métodos novos
+❌ NÃO remover nenhum método existente no repositório
 
 
 
-Problema atual
+Entradas de cada fluxo
 
-O DisponibilizarContabilizacaoHandler e o DisponibilizarContabilizacaoWorkerHandler
-processam registros sequencialmente — página por página, um lote por vez.
-Com 7 milhões de registros isso demora ~23 minutos.
+API (DisponibilizarContabilizacaoHandler)
 
-Solução
 
-Criar um ContabilizacaoDisponibilizacaoService que processa em paralelo usando
-OFFSET/FETCH + SemaphoreSlim(4) — simples, seguro, sem risco de duplicatas.
+Recebe via command: LoteId, DataBatch, DataProcessamento
+TotalRegistros vem no command ([JsonIgnore] — preenchido pelo Controller)
+Controller faz fire-and-forget via Task.Run e retorna 202 imediatamente
+NÃO mexer no Controller
+
+
+Worker (DisponibilizarContabilizacaoWorkerHandler)
+
+
+Consome DataProcessamento e DataBatch de um tópico Kafka via _processoBatchService.ConsumirMensagem()
+LoteId vem de request.Id
+NÃO gera nada internamente — tudo vem do consumer
+
 
 
 Arquivos a modificar
 
-ArquivoO que mudaContabilizacaoFluirDicQueries.csAdicionar query com OFFSET/FETCHIContabilizacaoFluirRepository.csAdicionar método ObterPorOffsetAsyncContabilizacaoFluirRepository.csImplementar ObterPorOffsetAsyncDisponibilizarContabilizacaoHandler.csSimplificar — delega pro novo serviçoDisponibilizarContabilizacaoWorkerHandler.csSimplificar — delega pro novo serviçoProcessoContabilizacaoService.csApenas TryPublishWithRetry → async
+ArquivoO que mudaContabilizacaoFluirDicQueries.csAdicionar query ObterPorOffsetIContabilizacaoFluirRepository.csAdicionar método ObterPorOffsetAsyncContabilizacaoFluirRepository.csImplementar ObterPorOffsetAsyncDisponibilizarContabilizacaoHandler.csSubstituir while(true) por chamada ao serviçoDisponibilizarContabilizacaoWorkerHandler.csSubstituir while(true) por chamada ao serviçoProcessoContabilizacaoService.csTryPublishWithRetry → TryPublishWithRetryAsync
 
 Arquivos novos a criar
 
 ArquivoCaminhoIContabilizacaoDisponibilizacaoService.csUA2.Consorcio.Application/Services/ContabilizacaoDisponibilizacaoService.csUA2.Consorcio.Application/Services/
 
 
-Passo 1 — Query OFFSET em ContabilizacaoFluirDicQueries.cs
+Passo 1 — Query em ContabilizacaoFluirDicQueries.cs
 
-Adicionar nova constante — não remover nem alterar o ObterPor e ObterCount existentes:
+Adicionar nova constante sem remover ObterCount e ObterPor existentes:
 
 csharppublic const string ObterPorOffset = @"
     SET NOCOUNT ON;
-    SELECT TOP (@PageSize)
-         t1.ID_Evento           AS IdEvento
-        ,t1.ID_Etapa            AS IdEtapa
-        -- (copiar exatamente as mesmas colunas do ObterPor existente)
+    SELECT
+         t1.ID_Evento                      AS IdEvento
+        ,t1.ID_Etapa                       AS IdEtapa
+        ,t1.ID_Movimento_Contabil          AS IdMovimentoContabil
+        ,t1.CD_Forma_Liquidacao            AS CodigoFormaLiquidacao
+        ,t1.CD_Situacao_Cobranca           AS CodigoSituacaoCobranca
+        ,t1.CD_Tipo_Garantia               AS CodigoTipoGarantia
+        ,t1.ID_Grupo                       AS IdGrupo
+        ,t1.ID_Cota                        AS IdCota
+        ,t1.ID_Empresa                     AS IdEmpresa
+        ,t1.ID_Documento                   AS IdDocumento
+        ,t1.ID_Tipo_Documento              AS IdTipoDocumento
+        ,t1.Empresa                        AS Empresa
+        ,t1.CD_Grupo                       AS CodigoGrupo
+        ,t1.Segmento                       AS Segmento
+        ,t1.CD_Cota                        AS CodigoCota
+        ,t1.Versao                         AS Versao
+        ,t1.PZ_Cota                        AS PazoCota
+        ,t1.QT_Dias_Contrato               AS QuantidadeDiasContrato
+        ,t1.DT_Venda                       AS DataVenda
+        ,t1.DT_Situacao_Cobranca           AS DataSituacaoCobranca
+        ,t1.CD_Usuario_Contratacao         AS CodigoUsuarioContratacao
+        ,t1.CD_Moeda                       AS CodigoMoeda
+        ,t1.CD_Tipo_Cliente                AS CodigoTipoCliente
+        ,t1.NO_Documento                   AS NumeroDocumento
+        ,t1.CD_Bem                         AS CodigoBem
+        ,t1.CD_Pessoa                      AS CodigoPessoa
+        ,t1.CD_Banco                       AS CodigoBanco
+        ,t1.NO_Agencia                     AS NumeroAgencia
+        ,t1.ST_Tipo_Conta_Corrente         AS SituacaoTipoContaCorrente
+        ,t1.NO_Conta_Corrente              AS NumeroContaCorrente
+        ,t1.DG_Conta_Corrente              AS DigitoContaCorrente
+        ,t1.Tipo_Evento                    AS TipoEvento
+        ,t1.Parametro_Contabil             AS ParametroContabil
+        ,t1.CD_Evento                      AS CodigoEvento
+        ,t1.NO_Sequencia                   AS NumeroSequencia
+        ,t1.DT_Contabil                    AS DataContabil
+        ,t1.DT_Pagamento                   AS DataPagamento
+        ,t1.CD_Referencia                  AS CodigoReferencia
+        ,t1.NO_Parcela                     AS NumeroParcela
+        ,t1.PE_Variacao_Preco_Bem          AS PercentualVariacaoPreco
+        ,t1.DT_Vencimento                  AS DataVencimento
+        ,t1.CD_Banco_Origem                AS CodigoBancoOrigem
+        ,t1.NO_Agencia_Origem              AS NumeroAgenciaOrigem
+        ,t1.ST_Tipo_Conta_Corrente_Origem  AS SituacaoTipoContaCorrenteOrigem
+        ,t1.NO_Conta_Corrente_Origem       AS NumeroContaCorrenteOrigem
+        ,t1.DG_Conta_Corrente_Origem       AS DigitoContaCorrenteOrigem
+        ,t1.CD_Banco_Destino               AS CodigoBancoDestino
+        ,t1.NO_Agencia_Destino             AS NumeroAgenciaDestino
+        ,t1.ST_Tipo_Conta_Corrente_Destino AS SituacaoTipoContaCorrenteDestino
+        ,t1.NO_Conta_Corrente_Destino      AS NumeroContaCorrenteDestino
+        ,t1.DG_Conta_Corrente_Destino      AS DigitoContaCorrenteDestino
+        ,t1.CD_Usuario                     AS CodigoUsuario
+        ,t1.VL_Lancamento                  AS ValorLancamento
+        ,t1.ST_Origem_Lancamento           AS SituacaoOrigemLancamento
+        ,t1.SN_Excluido                    AS Excluido
+        ,t1.ID_Aviso                       AS IdAviso
     FROM vm_TAaclContabilNewconFluir t1 WITH (NOLOCK)
     WHERE DM_Processamento = @DM_Processamento
       AND SN_Excluido = 'N'
@@ -54,8 +138,7 @@ csharppublic const string ObterPorOffset = @"
     OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
 
 
-Copiar exatamente as mesmas colunas do ObterPor existente. Só muda o filtro:
-remove AND ID_Evento > @ID_Evento e adiciona OFFSET/FETCH.
+⚠️ Não incluir DM_Processamento no SELECT — causaria coluna duplicada.
 
 
 
@@ -64,8 +147,7 @@ Passo 2 — Interface IContabilizacaoFluirRepository.cs
 
 Adicionar apenas o método novo. Não alterar nada do que já existe:
 
-csharp// Método novo para paralelismo com OFFSET
-Task<IEnumerable<ContabilizacaoFluirDto>> ObterPorOffsetAsync(
+csharpTask<IEnumerable<ContabilizacaoFluirDto>> ObterPorOffsetAsync(
     DateTime dataProcessamento,
     int offset,
     int pageSize);
@@ -73,7 +155,7 @@ Task<IEnumerable<ContabilizacaoFluirDto>> ObterPorOffsetAsync(
 
 Passo 3 — Repositório ContabilizacaoFluirRepository.cs
 
-Adicionar implementação seguindo exatamente o padrão já existente (SqlConnection + Dapper):
+Seguir exatamente o padrão já existente (SqlConnection + Dapper + DynamicParameters + CommandTimeout):
 
 csharppublic async Task<IEnumerable<ContabilizacaoFluirDto>> ObterPorOffsetAsync(
     DateTime dataProcessamento,
@@ -83,7 +165,8 @@ csharppublic async Task<IEnumerable<ContabilizacaoFluirDto>> ObterPorOffsetAsync
     try
     {
         using var connection = new SqlConnection(
-            ConnectionStringTokenDecryptor.DecryptConnectionString(_connectionConfiguration));
+            ConnectionStringTokenDecryptor.DecryptConnectionStringTokenized(
+                _connectionConfiguration.LeituraBaseS00));
 
         var query = new StringBuilder();
         query.AppendLine(ContabilizacaoFluirDicQueries.ObterPorOffset);
@@ -93,8 +176,12 @@ csharppublic async Task<IEnumerable<ContabilizacaoFluirDto>> ObterPorOffsetAsync
         param.Add("@Offset",           offset);
         param.Add("@PageSize",         pageSize);
 
-        return await connection.QueryAsync<ContabilizacaoFluirDto>(
-            query.ToString(), param, commandType: CommandType.Text);
+        var dados = await connection.QueryAsync<ContabilizacaoFluirDto>(
+            query.ToString(), param,
+            commandType: CommandType.Text,
+            commandTimeout: CommandTimeout);
+
+        return dados;
     }
     catch (Exception ex)
     {
@@ -113,8 +200,9 @@ public interface IContabilizacaoDisponibilizacaoService
 {
     Task ProcessarAsync(
         Guid loteId,
-        string dataBatch,
+        DateTime dataBatch,
         DateTime dataProcessamento,
+        int totalRegistro,
         CancellationToken cancellationToken);
 }
 
@@ -150,33 +238,20 @@ public class ContabilizacaoDisponibilizacaoService : IContabilizacaoDisponibiliz
 
     public async Task ProcessarAsync(
         Guid loteId,
-        string dataBatch,
+        DateTime dataBatch,
         DateTime dataProcessamento,
+        int totalRegistro,
         CancellationToken cancellationToken)
     {
-        // 1. Busca total de registros do dia
-        var totalRegistro = await _contabilizacaoFluirRepository
-            .ObterTotalLinhasAsync(dataProcessamento);
-
-        _logger.LogInformation(
-            "CONSULTA_REALIZADA | Fluxo=Processar | TotalRegistros={TotalRegistros}",
-            totalRegistro);
-
-        if (totalRegistro == 0)
-        {
-            _logger.LogInformation("LOTE_CONCLUIDO | Fluxo=Processar | TotalRegistros=0");
-            return;
-        }
-
-        // 2. Calcula total de chunks
+        // Calcula total de chunks
         var totalChunks = (int)Math.Ceiling((double)totalRegistro / ChunkSize);
 
         _logger.LogInformation(
             "CHUNKS_CALCULADOS | TotalChunks={TotalChunks} | ChunkSize={ChunkSize}",
             totalChunks, ChunkSize);
 
-        // 3. SemaphoreSlim garante no máximo 4 chunks simultâneos
-        //    Conforme um termina, o próximo entra automaticamente
+        // SemaphoreSlim: no máximo 4 chunks simultâneos
+        // Conforme um termina, o próximo entra automaticamente
         var semaphore = new SemaphoreSlim(MaxParalelismo);
 
         var tasks = Enumerable.Range(0, totalChunks)
@@ -195,13 +270,13 @@ public class ContabilizacaoDisponibilizacaoService : IContabilizacaoDisponibiliz
     private async Task ProcessarChunkAsync(
         int chunkIndex,
         DateTime dataProcessamento,
-        string dataBatch,
+        DateTime dataBatch,
         Guid loteId,
         int totalRegistro,
         SemaphoreSlim semaphore,
         CancellationToken cancellationToken)
     {
-        await semaphore.WaitAsync(cancellationToken); // aguarda vaga disponível
+        await semaphore.WaitAsync(cancellationToken);
         try
         {
             var offset = chunkIndex * ChunkSize;
@@ -211,35 +286,40 @@ public class ContabilizacaoDisponibilizacaoService : IContabilizacaoDisponibiliz
                 chunkIndex, offset);
 
             // Busca página do banco via OFFSET
-            var lista = (await _contabilizacaoFluirRepository.ObterPorOffsetAsync(
-                dataProcessamento, offset, ChunkSize)).ToList();
+            var contabilizacaoFluirList = (await _contabilizacaoFluirRepository
+                .ObterPorOffsetAsync(dataProcessamento, offset, ChunkSize)).ToList();
 
-            if (!lista.Any()) return;
+            if (!contabilizacaoFluirList.Any()) return;
 
-            // Busca cotas e grupos em paralelo
-            var idCotaSet  = lista.Select(x => x.IdCota).Distinct().ToArray();
-            var idGrupoSet = lista.Select(x => x.IdGrupo).Distinct().ToArray();
+            // Busca cotas e grupos em paralelo — igual ao original
+            var idCotaSet  = contabilizacaoFluirList.Select(x => x.IdCota).Distinct().ToArray();
+            var idGrupoSet = contabilizacaoFluirList.Select(x => x.IdGrupo).Distinct().ToArray();
 
             var taskCota  = _cotaRepository.ObterPorAsync(idCotaSet);
             var taskGrupo = _grupoRepository.ObterPorAsync(idGrupoSet);
             await Task.WhenAll(taskCota, taskGrupo);
 
             var cotaList  = (await taskCota)
-                .GroupBy(x => x.IdCota).ToDictionary(g => g.Key, g => g.First());
-            var grupoList = (await taskGrupo)
-                .GroupBy(x => x.IdGrupo).ToDictionary(g => g.Key, g => g.First());
+                .GroupBy(x => x.IdCota)
+                .ToDictionary(g => g.Key, g => g.First());
 
-            // Monta eventos em paralelo
-            var eventoContabilizacaoList = lista
+            var grupoList = (await taskGrupo)
+                .GroupBy(x => x.IdGrupo)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            // Monta eventos em paralelo — igual ao original
+            var eventoContabilizacaoList = contabilizacaoFluirList
                 .AsParallel()
                 .WithDegreeOfParallelism(10)
-                .Select(evento => EventoContabilizacaoWrapper.Criar(
-                    evento,
-                    cotaList.TryGetValue(evento.IdCota,   out var cota)  ? cota  : null,
-                    grupoList.TryGetValue(evento.IdGrupo, out var grupo) ? grupo : null))
+                .Select(evento =>
+                {
+                    var cotaDto  = cotaList.TryGetValue(evento.IdCota,   out var cota)  ? cota  : null;
+                    var grupoDto = grupoList.TryGetValue(evento.IdGrupo, out var grupo) ? grupo : null;
+                    return EventoContabilizacaoWrapper.Criar(evento, cotaDto, grupoDto);
+                })
                 .ToList();
 
-            // Monta lote e publica no Kafka
+            // Monta lote e publica — igual ao original
             var lote = new LoteWrapper(loteId, dataBatch, totalRegistro);
             foreach (var eventoContabil in eventoContabilizacaoList)
                 lote.AdicionarEventoContabilizacao(eventoContabil);
@@ -259,7 +339,7 @@ public class ContabilizacaoDisponibilizacaoService : IContabilizacaoDisponibiliz
         }
         finally
         {
-            semaphore.Release(); // libera vaga para o próximo chunk
+            semaphore.Release();
         }
     }
 }
@@ -267,85 +347,161 @@ public class ContabilizacaoDisponibilizacaoService : IContabilizacaoDisponibiliz
 
 Passo 6 — Simplificar DisponibilizarContabilizacaoHandler.cs (API)
 
-Substituir toda a lógica interna por delegação ao novo serviço.
-O handler só resolve as entradas e chama o serviço:
+Manter todas as injeções, logs e LogLoteContext existentes.
+Apenas substituir o while(true) por chamada ao serviço.
+
+O handler deve ficar assim:
 
 csharppublic class DisponibilizarContabilizacaoHandler
     : IRequestHandler<DisponibilizarContabilizacaoCommand, ICommandResult>
 {
     private readonly IContabilizacaoDisponibilizacaoService _disponibilizacaoService;
+    private readonly IContabilizacaoFluirRepository         _contabilizacaoFluirRepository;
     private readonly ILogger<DisponibilizarContabilizacaoHandler> _logger;
 
     public DisponibilizarContabilizacaoHandler(
         IContabilizacaoDisponibilizacaoService disponibilizacaoService,
+        IContabilizacaoFluirRepository         contabilizacaoFluirRepository,
         ILogger<DisponibilizarContabilizacaoHandler> logger)
     {
-        _disponibilizacaoService = disponibilizacaoService;
-        _logger                  = logger;
+        _disponibilizacaoService       = disponibilizacaoService;
+        _contabilizacaoFluirRepository = contabilizacaoFluirRepository;
+        _logger                        = logger;
     }
 
     public async Task<ICommandResult> Handle(
         DisponibilizarContabilizacaoCommand request,
         CancellationToken cancellationToken)
     {
-        var loteId            = request.LoteId.Value;
-        var dataBatch         = request.DataBatch.Value;
+        var loteId            = request.LoteId!.Value;
+        var dataBatch         = request.DataBatch!.Value;
         var dataProcessamento = request.DataProcessamento!.Value;
+        var totalRegistro     = request.TotalRegistros ?? 0;
 
-        _logger.LogInformation("LOTE_INICIADO | Fluxo=Handle | Origem=API");
+        using var logCtx = new LogLoteContext(loteId, dataBatch, "API", totalRegistro);
 
+        _logger.LogInformation(
+            "LOTE_INICIADO | Fluxo=Handle | TotalRegistros={TotalRegistros}", totalRegistro);
+
+        if (totalRegistro == 0)
+        {
+            _logger.LogInformation("LOTE_CONCLUIDO | Fluxo=Handle | TotalRegistros=0");
+            return new CommandResult(HttpStatusCode.OK.GetHashCode());
+        }
+
+        _logger.LogInformation(
+            "CONSULTA_REALIZADA | Fluxo=Handle | TotalRegistros={TotalRegistros}", totalRegistro);
+
+        // Substitui o while(true) — delega ao serviço paralelo
         await _disponibilizacaoService.ProcessarAsync(
-            loteId, dataBatch, dataProcessamento, cancellationToken);
+            loteId,
+            dataBatch,
+            dataProcessamento,
+            totalRegistro,
+            cancellationToken);
 
         return new CommandResult(HttpStatusCode.OK.GetHashCode());
     }
 }
 
 
+⚠️ As injeções de ICotaRepository, IGrupoRepository e IProcessoContabilizacaoService
+podem ser removidas deste handler — a lógica foi movida pro serviço.
+
+
+
+
 Passo 7 — Simplificar DisponibilizarContabilizacaoWorkerHandler.cs (Worker)
 
-O Worker não recebe nada — gera tudo internamente e delega pro mesmo serviço:
+Manter consumo do Kafka, validações, logs e LogLoteContext existentes.
+Apenas substituir o while(true) por chamada ao serviço.
+
+O handler deve ficar assim:
 
 csharppublic class DisponibilizarContabilizacaoWorkerHandler
     : IRequestHandler<DisponibilizarContabilizacaoWorkerCommand, ICommandResult>
 {
     private readonly IContabilizacaoDisponibilizacaoService _disponibilizacaoService;
+    private readonly IProcessoBatchService                  _processoBatchService;
+    private readonly IContabilizacaoFluirRepository         _contabilizacaoFluirRepository;
     private readonly ILogger<DisponibilizarContabilizacaoWorkerHandler> _logger;
 
     public DisponibilizarContabilizacaoWorkerHandler(
         IContabilizacaoDisponibilizacaoService disponibilizacaoService,
+        IProcessoBatchService                  processoBatchService,
+        IContabilizacaoFluirRepository         contabilizacaoFluirRepository,
         ILogger<DisponibilizarContabilizacaoWorkerHandler> logger)
     {
-        _disponibilizacaoService = disponibilizacaoService;
-        _logger                  = logger;
+        _disponibilizacaoService       = disponibilizacaoService;
+        _processoBatchService          = processoBatchService;
+        _contabilizacaoFluirRepository = contabilizacaoFluirRepository;
+        _logger                        = logger;
     }
 
     public async Task<ICommandResult> Handle(
         DisponibilizarContabilizacaoWorkerCommand request,
         CancellationToken cancellationToken)
     {
-        // Worker gera tudo internamente — não recebe parâmetros do command
-        var loteId           = Guid.NewGuid();
-        var saoPauloTimeZone = TimeZoneInfo.FindSystemTimeZoneById("E. South America Standard Time");
-        var dataProcessamento = TimeZoneInfo.ConvertTime(DateTime.UtcNow, saoPauloTimeZone);
-        var dataBatch        = dataProcessamento.ToString("yyyy-MM-dd");
+        // 1. Consome do Kafka — DataProcessamento e DataBatch vêm daqui
+        var resultConsumirMensagem = await _processoBatchService
+            .ConsumirMensagem(cancellationToken);
 
-        _logger.LogInformation("LOTE_INICIADO | Fluxo=Handle | Origem=WORKER");
+        if (!resultConsumirMensagem.Success)
+        {
+            var errorResult = new CommandResult(resultConsumirMensagem.StatusCode);
+            errorResult.AddNotifications((CommandResult)resultConsumirMensagem);
+            return errorResult;
+        }
 
+        long ultimoIdEvento = 0;
+        var commandResult         = new CommandResult(HttpStatusCode.Accepted.GetHashCode());
+        var processoBatchCommandResult =
+            (ObterStatusExecucaoCommandResult)resultConsumirMensagem;
+
+        // 2. Busca total de registros
+        var totalRegistro = await _contabilizacaoFluirRepository
+            .ObterTotalLinhasAsync(processoBatchCommandResult.DataProcessamento);
+
+        using var logCtx = new LogLoteContext(
+            request.Id, processoBatchCommandResult.DataBatch, "WORKER", totalRegistro);
+
+        _logger.LogInformation(
+            "LOTE_INICIADO | Fluxo=Handle | TotalRegistros={TotalRegistros}", totalRegistro);
+
+        if (totalRegistro == 0)
+        {
+            _logger.LogInformation("LOTE_CONCLUIDO | Fluxo=Handle | TotalRegistros=0");
+            return commandResult;
+        }
+
+        _logger.LogInformation(
+            "CONSULTA_REALIZADA | Fluxo=Handle | TotalRegistros={TotalRegistros}", totalRegistro);
+
+        // 3. Substitui o while(true) — delega ao serviço paralelo
+        //    DataProcessamento e DataBatch vêm do Kafka, não são gerados internamente
         await _disponibilizacaoService.ProcessarAsync(
-            loteId, dataBatch, dataProcessamento, cancellationToken);
+            request.Id,
+            processoBatchCommandResult.DataBatch,
+            processoBatchCommandResult.DataProcessamento,
+            totalRegistro,
+            cancellationToken);
 
-        return new CommandResult(HttpStatusCode.OK.GetHashCode());
+        return commandResult;
     }
 }
 
 
+⚠️ As injeções de ICotaRepository, IGrupoRepository e IProcessoContabilizacaoService
+podem ser removidas deste handler — a lógica foi movida pro serviço.
+
+
+
+
 Passo 8 — Atualizar TryPublishWithRetry em ProcessoContabilizacaoService.cs
 
-Apenas substituir o método síncrono por versão async — o comportamento de retry é mantido.
-Substituir também o Parallel.ForEach + Task.Run por Task.WhenAll.
+Apenas tornar o método async — comportamento de retry mantido intacto.
 
-8.1 — Remover TryPublishWithRetry e substituir por:
+8.1 — Substituir TryPublishWithRetry por TryPublishWithRetryAsync:
 
 csharpprivate async Task<bool> TryPublishWithRetryAsync(
     IProducer<string, ContabilizacaoGerada> producer,
@@ -363,38 +519,89 @@ csharpprivate async Task<bool> TryPublishWithRetryAsync(
     {
         try
         {
+            // await no lugar de .Result — não bloqueia a thread
             var result = await producer.ProduceAsync(topicName, message, cancellationToken);
 
             if (result.Status == PersistenceStatus.Persisted)
                 return true;
 
-            _logger.LogWarning(
-                "RETRY_TENTATIVA | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Tentativa={Tentativa}/{Max} | Status={Status}",
-                idEvento, attempt, maxRetries, result.Status);
+            if (enableRetry)
+            {
+                _logger.LogWarning(
+                    "RETRY_TENTATIVA | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Tentativa={Tentativa}/{Max} | Status={Status}",
+                    idEvento, attempt, maxRetries, result.Status);
 
-            if (attempt == maxRetries)
+                if (attempt == maxRetries)
+                    _logger.LogCritical(
+                        "LOTE_ABORTADO | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Tentativas={Max} | Status={Status}",
+                        idEvento, maxRetries, result.Status);
+            }
+            else
+            {
                 _logger.LogCritical(
-                    "LOTE_ABORTADO | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Tentativas={Max} | Status={Status}",
-                    idEvento, maxRetries, result.Status);
+                    "FALHA_DEPENDENCIA | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Status={Status}",
+                    idEvento, result.Status);
+            }
         }
-        catch (Exception ex) when (ex is KafkaException
-                                or AggregateException { InnerException: KafkaException })
+        catch (AggregateException ex) when (ex.InnerException is KafkaException kafkaEx)
         {
-            _logger.LogWarning(ex,
-                "RETRY_TENTATIVA | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Tentativa={Tentativa}/{Max}",
-                idEvento, attempt, maxRetries);
+            if (enableRetry)
+            {
+                _logger.LogWarning(
+                    "RETRY_TENTATIVA | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Tentativa={Tentativa}/{Max} | Erro={Erro}",
+                    idEvento, attempt, maxRetries, kafkaEx.Message);
 
-            if (attempt == maxRetries)
+                if (attempt == maxRetries)
+                    _logger.LogCritical(kafkaEx,
+                        "LOTE_ABORTADO | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Tentativas={Max}",
+                        idEvento, maxRetries);
+            }
+            else
+            {
+                _logger.LogCritical(kafkaEx,
+                    "FALHA_DEPENDENCIA | Fluxo=PublicacaoKafka | IdEvento={IdEvento}",
+                    idEvento);
+            }
+        }
+        catch (KafkaException ex)
+        {
+            if (enableRetry)
+            {
+                _logger.LogWarning(
+                    "RETRY_TENTATIVA | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Tentativa={Tentativa}/{Max} | Erro={Erro}",
+                    idEvento, attempt, maxRetries, ex.Message);
+
+                if (attempt == maxRetries)
+                    _logger.LogCritical(ex,
+                        "LOTE_ABORTADO | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Tentativas={Max}",
+                        idEvento, maxRetries);
+            }
+            else
+            {
                 _logger.LogCritical(ex,
-                    "LOTE_ABORTADO | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Tentativas={Max}",
-                    idEvento, maxRetries);
+                    "FALHA_DEPENDENCIA | Fluxo=PublicacaoKafka | IdEvento={IdEvento}",
+                    idEvento);
+            }
         }
         catch (Exception ex)
         {
-            _logger.LogCritical(ex,
-                "FALHA_DEPENDENCIA | Fluxo=PublicacaoKafka | IdEvento={IdEvento}",
-                idEvento);
-            return false;
+            if (enableRetry)
+            {
+                _logger.LogWarning(
+                    "RETRY_TENTATIVA | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Tentativa={Tentativa}/{Max} | Erro={Erro}",
+                    idEvento, attempt, maxRetries, ex.Message);
+
+                if (attempt == maxRetries)
+                    _logger.LogCritical(ex,
+                        "LOTE_ABORTADO | Fluxo=PublicacaoKafka | IdEvento={IdEvento} | Tentativas={Max}",
+                        idEvento, maxRetries);
+            }
+            else
+            {
+                _logger.LogCritical(ex,
+                    "FALHA_DEPENDENCIA | Fluxo=PublicacaoKafka | IdEvento={IdEvento}",
+                    idEvento);
+            }
         }
     }
 
@@ -423,8 +630,7 @@ csharpawait Task.WhenAll(loteWrapper.EventosContabilizacoes.Select(async item =>
 
 Passo 9 — Registrar no DI
 
-No arquivo de registro de dependências do projeto Application
-(seguir o padrão já existente no projeto):
+Seguir o padrão de registro já existente no projeto:
 
 csharpservices.AddScoped<IContabilizacaoDisponibilizacaoService,
                    ContabilizacaoDisponibilizacaoService>();
@@ -435,37 +641,95 @@ csharpservices.AddScoped<IContabilizacaoDisponibilizacaoService,
 
 
 
+
 Passo 10 — Testes unitários
 
-Criar seguindo o padrão já existente no projeto (Moq ou NSubstitute):
+Regra geral
 
-ContabilizacaoDisponibilizacaoServiceTests.cs
+
+Repassar em todos os testes unitários existentes que cubram os arquivos modificados
+Corrigir qualquer teste que quebre com as mudanças
+Criar testes novos para os novos componentes
+Cobertura mínima obrigatória: 100% em todos os arquivos criados ou modificados
+
+
+Arquivos de teste a criar/atualizar:
+
+ContabilizacaoDisponibilizacaoServiceTests.cs (CRIAR)
 
 ✅ ProcessarAsync_QuandoTotalZero_NaoProcessa
 ✅ ProcessarAsync_QuandoHaRegistros_CriaChunksCorretamente
 ✅ ProcessarAsync_QuandoChunkVazio_Ignora
-✅ ProcessarAsync_RespeitaMaxParalelismo
+✅ ProcessarAsync_RespeitaMaxParalelismoDe4
+✅ ProcessarAsync_PropagaExcecaoDoChunk
+✅ ProcessarAsync_ChamaPublicarParaCadaChunk
+✅ ProcessarAsync_ChamaObterCotasEGruposEmParalelo
 
-DisponibilizarContabilizacaoHandlerTests.cs
+DisponibilizarContabilizacaoHandlerTests.cs (ATUALIZAR)
 
+✅ Handle_QuandoTotalZero_RetornaSemProcessar
 ✅ Handle_PassaParametrosCorretosProServico
 ✅ Handle_Retorna200QuandoServicoConclui
 ✅ Handle_PropagaExcecaoDoServico
+✅ Handle_LogaLoteIniciado
+✅ Handle_LogaLoteConcluido
 
-DisponibilizarContabilizacaoWorkerHandlerTests.cs
+DisponibilizarContabilizacaoWorkerHandlerTests.cs (ATUALIZAR)
 
-✅ Handle_GeraLoteIdAutomaticamente
-✅ Handle_UsaDataProcessamentoHorarioSaoPaulo
-✅ Handle_Retorna200QuandoServicoConclui
+✅ Handle_QuandoConsumerFalha_RetornaErro
+✅ Handle_QuandoTotalZero_RetornaSemProcessar
+✅ Handle_PassaDataProcessamentoDoKafkaProServico
+✅ Handle_PassaDataBatchDoKafkaProServico
+✅ Handle_PassaLoteIdDoRequestProServico
+✅ Handle_Retorna202QuandoServicoConclui
 ✅ Handle_PropagaExcecaoDoServico
+✅ Handle_LogaLoteIniciado
 
-TryPublishWithRetryAsyncTests.cs
+ContabilizacaoFluirRepositoryTests.cs (ATUALIZAR)
 
-✅ Retry_PrimeiraPublicacaoSucesso_RetornaTrue
-✅ Retry_PrimeiraFalha_TentaNovamente
-✅ Retry_AtingeMaxRetries_RetornaFalse
-✅ Retry_KafkaException_FazRetry
-✅ Retry_ExceptionGenerica_NaoFazRetry
+✅ ObterPorOffsetAsync_RetornaRegistrosDaPagina
+✅ ObterPorOffsetAsync_QuandoOffsetMaiorQueTotal_RetornaVazio
+✅ ObterPorOffsetAsync_FiltradoPorDataProcessamento
+✅ ObterPorOffsetAsync_QuandoExcecao_LogaERelanca
+
+ProcessoContabilizacaoServiceTests.cs (ATUALIZAR)
+
+✅ TryPublishWithRetryAsync_QuandoSucesso_RetornaTrue
+✅ TryPublishWithRetryAsync_QuandoFalha_TentaNovamente
+✅ TryPublishWithRetryAsync_QuandoAtingeMaxRetries_RetornaFalse
+✅ TryPublishWithRetryAsync_QuandoKafkaException_FazRetry
+✅ TryPublishWithRetryAsync_QuandoAggregateException_FazRetry
+✅ TryPublishWithRetryAsync_QuandoExceptionGenerica_FazRetry
+✅ TryPublishWithRetryAsync_ComRetryDesabilitado_NaoTentaNovamente
+
+Após finalizar os testes
+
+Rodar o comando de cobertura e garantir 100% nos arquivos modificados:
+
+bashdotnet test --collect:"XPlat Code Coverage"
+
+
+⚠️ Não abrir o PR sem cobertura de 100% nos arquivos novos e modificados.
+
+
+
+
+Finalização — Abrir PR
+
+Após tudo implementado, testado e com cobertura 100%:
+
+bashgit add .
+git commit -m "feat: paralelizar processamento de contabilização com SemaphoreSlim"
+git push origin feature/codificacao_performance
+
+Abrir PR:
+
+
+De: feature/codificacao_performance
+Para: feature/melhorias_performaces
+Título: feat: paralelizar processamento de contabilização com SemaphoreSlim
+Descrição: incluir resumo das mudanças, arquivos modificados e estimativa de performance
+
 
 
 O que NÃO mudar
@@ -474,14 +738,19 @@ O que NÃO mudar
 ContabilizacoesController.cs — NÃO TOCAR
 
 Já faz fire-and-forget via Task.Run — retorna 202 imediatamente
-O paralelismo acontece dentro do serviço, não aqui
+Já busca TotalRegistros e passa no command
 
 
 
 ContabilizacaoNewconWorker.cs — NÃO TOCAR
+
+Já chama mediator.Send(new DisponibilizarContabilizacaoWorkerCommand())
+
+
+
 DisponibilizarContabilizacaoCommand.cs — NÃO TOCAR
 DisponibilizarContabilizacaoWorkerCommand.cs — NÃO TOCAR
-Métodos existentes no repositório — NÃO TOCAR, apenas adicionar
+Métodos ObterCount e ObterPor no repositório — NÃO TOCAR
 
 
 
@@ -489,24 +758,24 @@ Fluxo final
 
 API:
   POST /contabilizacoes
-    → Controller busca total, retorna 202 imediatamente
+    → Controller busca TotalRegistros, retorna 202 imediatamente
     → Task.Run (fire-and-forget)
          → DisponibilizarContabilizacaoHandler
+              → loteId, dataBatch, dataProcessamento, totalRegistro vêm do command
               → ContabilizacaoDisponibilizacaoService.ProcessarAsync()
-                   → COUNT do dia
-                   → 700 chunks, 4 simultâneos via SemaphoreSlim
+                   → totalChunks = ceil(totalRegistro / 10.000)
+                   → SemaphoreSlim(4): sempre 4 chunks simultâneos
                    → cada chunk: OFFSET → cotas/grupos → eventos → Kafka
 
 WORKER:
-  Cron dispara → consome Kafka → recebe DataProcessamento/DataBatch
+  Cron → ContabilizacaoNewconWorker → mediator.Send(DisponibilizarContabilizacaoWorkerCommand)
     → DisponibilizarContabilizacaoWorkerHandler
-         → gera LoteId, DataBatch, DataProcessamento
+         → ConsumirMensagem() → DataProcessamento e DataBatch vêm do Kafka
+         → ObterTotalLinhasAsync(dataProcessamento)
          → ContabilizacaoDisponibilizacaoService.ProcessarAsync()
-              → COUNT do dia
-              → 700 chunks, 4 simultâneos via SemaphoreSlim
-              → cada chunk: OFFSET → cotas/grupos → eventos → Kafka
-              → Worker aguarda conclusão
+              → mesmo fluxo de chunks
+              → Worker aguarda conclusão (não é fire-and-forget)
 
 Estimativa de performance (7M registros)
 
-MétricaAntesDepoisConsultas ao bancoSequencial4 simultâneasTempo estimado~23 min~6 min
+MétricaAntesDepoisConsultas ao bancoSequencial (1 por vez)4 simultâneasTempo estimado~23 min~6 min
