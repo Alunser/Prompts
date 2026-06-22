@@ -1,91 +1,325 @@
-// Bypass para requests de autenticação
-const url = bru.getEnvVar("__request_url") || "";
-if (url.includes("/oauth/token") || url.includes("/token_info")) {
-  return;
-}
+Vou mandar arquivo por arquivo!
 
-const https = require('https');
-const axios = require('axios');
-const fs = require('fs');
+ALTERAR — ContabilizacaoFluirDicQueries.cs
+Adicionar nova constante, sem remover nada:
+csharppublic const string ObterRangeIds = @"
+    SET NOCOUNT ON;
+    SELECT MIN(ID_Evento) AS IdMin,
+           MAX(ID_Evento) AS IdMax
+    FROM vm_TAaclContabilNewconFluir WITH (NOLOCK)
+    WHERE DM_Processamento = @DM_Processamento
+      AND SN_Excluido = 'N'";
 
-// Configuração do agente HTTPS com certificado corporativo
-const ca = fs.readFileSync('C:\\Users\\UNSERAL\\certificados\\ca_interno_itau.cer');
-const agent = new https.Agent({ ca });
+public const string ObterPorFatia = @"
+    SET NOCOUNT ON;
+    SELECT TOP (@PageSize)
+         t1.ID_Evento                      AS IdEvento
+        ,t1.ID_Etapa                       AS IdEtapa
+        ,t1.ID_Movimento_Contabil          AS IdMovimentoContabil
+        ,t1.CD_Forma_Liquidacao            AS CodigoFormaLiquidacao
+        ,t1.CD_Situacao_Cobranca           AS CodigoSituacaoCobranca
+        ,t1.CD_Tipo_Garantia               AS CodigoTipoGarantia
+        ,t1.ID_Grupo                       AS IdGrupo
+        ,t1.ID_Cota                        AS IdCota
+        ,t1.ID_Empresa                     AS IdEmpresa
+        ,t1.ID_Documento                   AS IdDocumento
+        ,t1.ID_Tipo_Documento              AS IdTipoDocumento
+        ,t1.Empresa                        AS Empresa
+        ,t1.CD_Grupo                       AS CodigoGrupo
+        ,t1.Segmento                       AS Segmento
+        ,t1.CD_Cota                        AS CodigoCota
+        ,t1.Versao                         AS Versao
+        ,t1.PZ_Cota                        AS PazoCota
+        ,t1.QT_Dias_Contrato               AS QuantidadeDiasContrato
+        ,t1.DT_Venda                       AS DataVenda
+        ,t1.DT_Situacao_Cobranca           AS DataSituacaoCobranca
+        ,t1.CD_Usuario_Contratacao         AS CodigoUsuarioContratacao
+        ,t1.CD_Moeda                       AS CodigoMoeda
+        ,t1.CD_Tipo_Cliente                AS CodigoTipoCliente
+        ,t1.NO_Documento                   AS NumeroDocumento
+        ,t1.CD_Bem                         AS CodigoBem
+        ,t1.CD_Pessoa                      AS CodigoPessoa
+        ,t1.CD_Banco                       AS CodigoBanco
+        ,t1.NO_Agencia                     AS NumeroAgencia
+        ,t1.ST_Tipo_Conta_Corrente         AS SituacaoTipoContaCorrente
+        ,t1.NO_Conta_Corrente              AS NumeroContaCorrente
+        ,t1.DG_Conta_Corrente              AS DigitoContaCorrente
+        ,t1.Tipo_Evento                    AS TipoEvento
+        ,t1.Parametro_Contabil             AS ParametroContabil
+        ,t1.CD_Evento                      AS CodigoEvento
+        ,t1.NO_Sequencia                   AS NumeroSequencia
+        ,t1.DT_Contabil                    AS DataContabil
+        ,t1.DT_Pagamento                   AS DataPagamento
+        ,t1.CD_Referencia                  AS CodigoReferencia
+        ,t1.NO_Parcela                     AS NumeroParcela
+        ,t1.PE_Variacao_Preco_Bem          AS PercentualVariacaoPreco
+        ,t1.DT_Vencimento                  AS DataVencimento
+        ,t1.CD_Banco_Origem                AS CodigoBancoOrigem
+        ,t1.NO_Agencia_Origem              AS NumeroAgenciaOrigem
+        ,t1.ST_Tipo_Conta_Corrente_Origem  AS SituacaoTipoContaCorrenteOrigem
+        ,t1.NO_Conta_Corrente_Origem       AS NumeroContaCorrenteOrigem
+        ,t1.DG_Conta_Corrente_Origem       AS DigitoContaCorrenteOrigem
+        ,t1.CD_Banco_Destino               AS CodigoBancoDestino
+        ,t1.NO_Agencia_Destino             AS NumeroAgenciaDestino
+        ,t1.ST_Tipo_Conta_Corrente_Destino AS SituacaoTipoContaCorrenteDestino
+        ,t1.NO_Conta_Corrente_Destino      AS NumeroContaCorrenteDestino
+        ,t1.DG_Conta_Corrente_Destino      AS DigitoContaCorrenteDestino
+        ,t1.CD_Usuario                     AS CodigoUsuario
+        ,t1.VL_Lancamento                  AS ValorLancamento
+        ,t1.ST_Origem_Lancamento           AS SituacaoOrigemLancamento
+        ,t1.SN_Excluido                    AS Excluido
+        ,t1.ID_Aviso                       AS IdAviso
+    FROM vm_TAaclContabilNewconFluir t1 WITH (NOLOCK)
+    WHERE DM_Processamento = @DM_Processamento
+      AND SN_Excluido = 'N'
+      AND ID_Evento > @UltimoIdEvento
+      AND ID_Evento <= @LimiteFatia
+    ORDER BY ID_Evento ASC";
 
-const TOLERANCIA_MS = 30 * 1000;
-const TOKEN_URL = bru.getEnvVar("auth_url");
-const TOKEN_INFO_URL = `${TOKEN_URL}_info`;
+ALTERAR — IContabilizacaoFluirRepository.cs
+Adicionar dois métodos novos, sem remover nada:
+csharpTask<RangeIdEventoDto> ObterRangeIdsAsync(DateTime dataProcessamento);
 
-// Configuração padrão do axios com agent e timeout
-const axiosConfig = {
-  headers: { "Content-Type": "application/x-www-form-urlencoded" },
-  httpsAgent: agent,
-  timeout: 10000 // 10 segundos
-};
+Task<IEnumerable<ContabilizacaoFluirDto>> ObterPorFatiaAsync(
+    DateTime dataProcessamento,
+    long ultimoIdEvento,
+    long limiteFatia,
+    int pageSize);
 
-let accessToken = bru.getEnvVar("access_token");
-
-async function generateNewToken() {
-  const clientId = bru.getEnvVar("client_id");
-  const clientSecret = bru.getEnvVar("client_secret");
-
-  if (!clientId || !clientSecret || !TOKEN_URL) {
-    throw new Error(`Variáveis ausentes — client_id: ${!!clientId}, client_secret: ${!!clientSecret}, auth_url: ${!!TOKEN_URL}`);
-  }
-
-  const requestBody = `client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&grant_type=client_credentials`;
-
-  console.log("i Gerando novo token...");
-
-  const response = await axios.post(TOKEN_URL, requestBody, axiosConfig);
-
-  if (response.status !== 200) {
-    throw new Error(`Status ${response.status}: ${JSON.stringify(response.data)}`);
-  }
-
-  const newToken = response.data.access_token;
-  if (!newToken) throw new Error("Resposta sem access_token");
-
-  bru.setEnvVar("access_token", newToken);
-  console.log("✓ Token gerado com sucesso");
-  return newToken;
-}
-
-async function validateToken(token) {
-  try {
-    const response = await axios.post(
-      `${TOKEN_INFO_URL}?token=${token}`,
-      "",
-      axiosConfig
-    );
-
-    if (response.status !== 200) return false;
-
-    const { active, exp } = response.data;
-    const tempoRestante = (Number(exp) * 1000) - Date.now();
-
-    if (!active || tempoRestante <= TOLERANCIA_MS) {
-      console.log(`△ Token expirando em ${Math.round(tempoRestante / 1000)}s. Renovando...`);
-      return false;
+CRIAR — UA2.Consorcio.Domain/Dtos/RangeIdEventoDto.cs
+csharpnamespace UA2.Consorcio.Domain.Dtos
+{
+    public class RangeIdEventoDto
+    {
+        public long IdMin { get; set; }
+        public long IdMax { get; set; }
     }
-
-    console.log(`✓ Token válido (${Math.round(tempoRestante / 1000)}s restantes)`);
-    return true;
-  } catch (error) {
-    console.log(`△ Erro ao validar token: ${error.message}. Renovando...`);
-    return false;
-  }
 }
 
-async function ensureValidToken() {
-  try {
-    if (!accessToken || !(await validateToken(accessToken))) {
-      accessToken = await generateNewToken();
+ALTERAR — ContabilizacaoFluirRepository.cs
+Adicionar dois métodos novos no final da classe:
+csharppublic async Task<RangeIdEventoDto> ObterRangeIdsAsync(DateTime dataProcessamento)
+{
+    try
+    {
+        using var connection = new SqlConnection(
+            ConnectionStringTokenDecryptor.DecryptConnectionStringTokenized(
+                _connectionConfiguration.LeituraBaseS00));
+
+        var query = new StringBuilder();
+        query.AppendLine(ContabilizacaoFluirDicQueries.ObterRangeIds);
+
+        var param = new DynamicParameters();
+        param.Add("@DM_Processamento", dataProcessamento);
+
+        return await connection.QuerySingleAsync<RangeIdEventoDto>(
+            query.ToString(), param,
+            commandType: CommandType.Text,
+            commandTimeout: CommandTimeout);
     }
-  } catch (error) {
-    console.error("✗ Falha ao obter token:", error.message);
-    throw error;
-  }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex,
+            "FALHA_DEPENDENCIA | Fluxo=ObterRangeIdsAsync | Erro={Erro}", ex.Message);
+        throw;
+    }
 }
 
-await ensureValidToken();
+public async Task<IEnumerable<ContabilizacaoFluirDto>> ObterPorFatiaAsync(
+    DateTime dataProcessamento,
+    long ultimoIdEvento,
+    long limiteFatia,
+    int pageSize)
+{
+    try
+    {
+        using var connection = new SqlConnection(
+            ConnectionStringTokenDecryptor.DecryptConnectionStringTokenized(
+                _connectionConfiguration.LeituraBaseS00));
+
+        var query = new StringBuilder();
+        query.AppendLine(ContabilizacaoFluirDicQueries.ObterPorFatia);
+
+        var param = new DynamicParameters();
+        param.Add("@DM_Processamento", dataProcessamento);
+        param.Add("@UltimoIdEvento",   ultimoIdEvento);
+        param.Add("@LimiteFatia",      limiteFatia);
+        param.Add("@PageSize",         pageSize);
+
+        return await connection.QueryAsync<ContabilizacaoFluirDto>(
+            query.ToString(), param,
+            commandType: CommandType.Text,
+            commandTimeout: CommandTimeout);
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex,
+            "FALHA_DEPENDENCIA | Fluxo=ObterPorFatiaAsync | Erro={Erro}", ex.Message);
+        throw;
+    }
+}
+
+ALTERAR — ContabilizacaoDisponibilizacaoService.cs
+Substituir o conteúdo completo da classe:
+csharpusing System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using UA2.Consorcio.Domain.Interfaces.Repositories;
+using UA2.Consorcio.Domain.Interfaces.Services;
+using UA2.Consorcio.Domain.Wrappers;
+
+namespace UA2.Consorcio.Application.Services
+{
+    public class ContabilizacaoDisponibilizacaoService : IContabilizacaoDisponibilizacaoService
+    {
+        private const int ChunkSize      = 10_000;
+        private const int MaxParalelismo = 4;
+
+        private readonly IContabilizacaoFluirRepository _contabilizacaoFluirRepository;
+        private readonly ICotaRepository                _cotaRepository;
+        private readonly IGrupoRepository               _grupoRepository;
+        private readonly IProcessoContabilizacaoService _processoContabilizacaoService;
+        private readonly ILogger<ContabilizacaoDisponibilizacaoService> _logger;
+
+        public ContabilizacaoDisponibilizacaoService(
+            IContabilizacaoFluirRepository contabilizacaoFluirRepository,
+            ICotaRepository                cotaRepository,
+            IGrupoRepository               grupoRepository,
+            IProcessoContabilizacaoService processoContabilizacaoService,
+            ILogger<ContabilizacaoDisponibilizacaoService> logger)
+        {
+            _contabilizacaoFluirRepository = contabilizacaoFluirRepository;
+            _cotaRepository                = cotaRepository;
+            _grupoRepository               = grupoRepository;
+            _processoContabilizacaoService = processoContabilizacaoService;
+            _logger                        = logger;
+        }
+
+        public async Task ProcessarAsync(
+            Guid loteId,
+            DateTime dataBatch,
+            DateTime dataProcessamento,
+            int totalRegistro,
+            CancellationToken cancellationToken)
+        {
+            // 1. Busca MIN e MAX do dia
+            var range = await _contabilizacaoFluirRepository
+                .ObterRangeIdsAsync(dataProcessamento);
+
+            _logger.LogInformation(
+                "RANGE_OBTIDO | IdMin={IdMin} | IdMax={IdMax}",
+                range.IdMin, range.IdMax);
+
+            // 2. Divide em N fatias — uma por paralelo
+            var fatias = DividirEmFatias(range.IdMin, range.IdMax, MaxParalelismo);
+
+            // 3. Cada fatia roda em paralelo com seu próprio cursor interno
+            var tasks = fatias.Select(fatia => ProcessarFatiaAsync(
+                fatia.IdInicio,
+                fatia.IdFim,
+                dataProcessamento,
+                dataBatch,
+                loteId,
+                totalRegistro,
+                cancellationToken));
+
+            await Task.WhenAll(tasks);
+        }
+
+        private static IEnumerable<(long IdInicio, long IdFim)> DividirEmFatias(
+            long idMin, long idMax, int totalFatias)
+        {
+            var tamanhoFatia = (long)Math.Ceiling((double)(idMax - idMin + 1) / totalFatias);
+
+            for (var i = 0; i < totalFatias; i++)
+            {
+                var inicio = idMin + (i * tamanhoFatia);
+                var fim    = Math.Min(inicio + tamanhoFatia - 1, idMax);
+                if (inicio > idMax) break;
+                yield return (inicio, fim);
+            }
+        }
+
+        private async Task ProcessarFatiaAsync(
+            long idInicio,
+            long idFim,
+            DateTime dataProcessamento,
+            DateTime dataBatch,
+            Guid loteId,
+            int totalRegistro,
+            CancellationToken cancellationToken)
+        {
+            // Cursor começa antes do primeiro ID da fatia
+            var ultimoIdEvento = idInicio - 1;
+
+            _logger.LogInformation(
+                "FATIA_INICIADA | IdInicio={IdInicio} | IdFim={IdFim}",
+                idInicio, idFim);
+
+            while (true)
+            {
+                // Cursor avança pelo último ID — tempo constante, usa índice
+                var lista = (await _contabilizacaoFluirRepository.ObterPorFatiaAsync(
+                    dataProcessamento,
+                    ultimoIdEvento,
+                    idFim,
+                    ChunkSize)).ToList();
+
+                if (!lista.Any()) break;
+
+                ultimoIdEvento = lista.Last().IdEvento;
+
+                var idCotaSet  = lista.Select(x => x.IdCota).Distinct().ToArray();
+                var idGrupoSet = lista.Select(x => x.IdGrupo).Distinct().ToArray();
+
+                var taskCota  = _cotaRepository.ObterPorAsync(idCotaSet);
+                var taskGrupo = _grupoRepository.ObterPorAsync(idGrupoSet);
+                await Task.WhenAll(taskCota, taskGrupo);
+
+                var cotaList = (await taskCota)
+                    .GroupBy(x => x.IdCota)
+                    .ToDictionary(g => g.Key, g => g.First());
+
+                var grupoList = (await taskGrupo)
+                    .GroupBy(x => x.IdGrupo)
+                    .ToDictionary(g => g.Key, g => g.First());
+
+                var eventoContabilizacaoList = lista
+                    .AsParallel()
+                    .WithDegreeOfParallelism(10)
+                    .Select(evento =>
+                    {
+                        var cotaDto  = cotaList.TryGetValue(evento.IdCota,   out var cota)  ? cota  : null;
+                        var grupoDto = grupoList.TryGetValue(evento.IdGrupo, out var grupo) ? grupo : null;
+                        return EventoContabilizacaoWrapper.Criar(evento, cotaDto, grupoDto);
+                    })
+                    .ToList();
+
+                var lote = new LoteWrapper(loteId, dataBatch, totalRegistro);
+                foreach (var eventoContabil in eventoContabilizacaoList)
+                    lote.AdicionarEventoContabilizacao(eventoContabil);
+
+                await _processoContabilizacaoService
+                    .PublicarContabilizacaoAsync(lote, cancellationToken);
+
+                _logger.LogInformation(
+                    "FATIA_PAGINA | UltimoId={UltimoId} | LimiteFatia={LimiteFatia} | Eventos={Eventos}",
+                    ultimoIdEvento, idFim, eventoContabilizacaoList.Count);
+            }
+
+            _logger.LogInformation(
+                "FATIA_CONCLUIDA | IdInicio={IdInicio} | IdFim={IdFim}",
+                idInicio, idFim);
+        }
+    }
+}
+
+Resumo das mudanças
+AçãoArquivo✅ AlterarContabilizacaoFluirDicQueries.cs — 2 queries novas✅ AlterarIContabilizacaoFluirRepository.cs — 2 métodos novos✅ CriarDomain/Dtos/RangeIdEventoDto.cs✅ AlterarContabilizacaoFluirRepository.cs — 2 implementações novas✅ AlterarContabilizacaoDisponibilizacaoService.cs — fatias com cursor
+
+⚠️ O ObterPorOffset e ObterPorOffsetAsync podem ser mantidos ou removidos — não são mais usados pela nova lógica.
+
+Pode testar quando quiser!
