@@ -8,6 +8,7 @@ const https = require('https');
 const axios = require('axios');
 const fs = require('fs');
 
+// Configuração do agente HTTPS com certificado corporativo
 const ca = fs.readFileSync('C:\\Users\\UNSERAL\\certificados\\ca_interno_itau.cer');
 const agent = new https.Agent({ ca });
 
@@ -15,63 +16,75 @@ const TOLERANCIA_MS = 30 * 1000;
 const TOKEN_URL = bru.getEnvVar("auth_url");
 const TOKEN_INFO_URL = `${TOKEN_URL}_info`;
 
+// Configuração padrão do axios com agent e timeout
+const axiosConfig = {
+  headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  httpsAgent: agent,
+  timeout: 10000 // 10 segundos
+};
+
 let accessToken = bru.getEnvVar("access_token");
 
 async function generateNewToken() {
   const clientId = bru.getEnvVar("client_id");
   const clientSecret = bru.getEnvVar("client_secret");
-  
-  // LOGS DE DEBUG
-  console.log("=== DEBUG generateNewToken ===");
-  console.log("TOKEN_URL:", TOKEN_URL);
-  console.log("clientId:", clientId);
-  console.log("clientSecret:", clientSecret ? "***preenchido***" : "VAZIO/UNDEFINED");
+
+  if (!clientId || !clientSecret || !TOKEN_URL) {
+    throw new Error(`Variáveis ausentes — client_id: ${!!clientId}, client_secret: ${!!clientSecret}, auth_url: ${!!TOKEN_URL}`);
+  }
 
   const requestBody = `client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&grant_type=client_credentials`;
-  console.log("requestBody:", requestBody);
 
+  console.log("i Gerando novo token...");
+
+  const response = await axios.post(TOKEN_URL, requestBody, axiosConfig);
+
+  if (response.status !== 200) {
+    throw new Error(`Status ${response.status}: ${JSON.stringify(response.data)}`);
+  }
+
+  const newToken = response.data.access_token;
+  if (!newToken) throw new Error("Resposta sem access_token");
+
+  bru.setEnvVar("access_token", newToken);
+  console.log("✓ Token gerado com sucesso");
+  return newToken;
+}
+
+async function validateToken(token) {
   try {
     const response = await axios.post(
-      TOKEN_URL,
-      requestBody,
-      {
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        httpsAgent: agent
-      }
+      `${TOKEN_INFO_URL}?token=${token}`,
+      "",
+      axiosConfig
     );
 
-    console.log("Status:", response.status);
-    console.log("Response:", JSON.stringify(response.data));
+    if (response.status !== 200) return false;
 
-    if (response.status !== 200) {
-      throw new Error(`Status ${response.status}: ${JSON.stringify(response.data)}`);
+    const { active, exp } = response.data;
+    const tempoRestante = (Number(exp) * 1000) - Date.now();
+
+    if (!active || tempoRestante <= TOLERANCIA_MS) {
+      console.log(`△ Token expirando em ${Math.round(tempoRestante / 1000)}s. Renovando...`);
+      return false;
     }
 
-    const newToken = response.data.access_token;
-    if (!newToken) throw new Error("Resposta sem access_token");
-
-    bru.setEnvVar("access_token", newToken);
-    console.log("✓ Novo token gerado com sucesso");
-    return newToken;
+    console.log(`✓ Token válido (${Math.round(tempoRestante / 1000)}s restantes)`);
+    return true;
   } catch (error) {
-    console.error("✗ Erro ao gerar token:", error.message);
-    if (error.response) {
-      console.error("Response status:", error.response.status);
-      console.error("Response data:", JSON.stringify(error.response.data));
-    }
-    throw error;
+    console.log(`△ Erro ao validar token: ${error.message}. Renovando...`);
+    return false;
   }
 }
 
 async function ensureValidToken() {
-  if (!accessToken) {
-    console.log("i Nenhum token encontrado. Gerando novo...");
-    accessToken = await generateNewToken();
-  } else {
-    const isValid = await validateToken(accessToken);
-    if (!isValid) {
+  try {
+    if (!accessToken || !(await validateToken(accessToken))) {
       accessToken = await generateNewToken();
     }
+  } catch (error) {
+    console.error("✗ Falha ao obter token:", error.message);
+    throw error;
   }
 }
 
