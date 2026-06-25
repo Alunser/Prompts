@@ -1,325 +1,161 @@
-Vou mandar arquivo por arquivo!
+## Contexto
+Implementar o método reprocessar() no ContabilizacoesClient
+do projeto itau-fx9-app-plat-cont-val-conc-ctb-lbd.
 
-ALTERAR — ContabilizacaoFluirDicQueries.cs
-Adicionar nova constante, sem remover nada:
-csharppublic const string ObterRangeIds = @"
-    SET NOCOUNT ON;
-    SELECT MIN(ID_Evento) AS IdMin,
-           MAX(ID_Evento) AS IdMax
-    FROM vm_TAaclContabilNewconFluir WITH (NOLOCK)
-    WHERE DM_Processamento = @DM_Processamento
-      AND SN_Excluido = 'N'";
+Esse método é chamado pelo LoteService quando o tipo
+de processamento é REPROCESSAMENTO.
 
-public const string ObterPorFatia = @"
-    SET NOCOUNT ON;
-    SELECT TOP (@PageSize)
-         t1.ID_Evento                      AS IdEvento
-        ,t1.ID_Etapa                       AS IdEtapa
-        ,t1.ID_Movimento_Contabil          AS IdMovimentoContabil
-        ,t1.CD_Forma_Liquidacao            AS CodigoFormaLiquidacao
-        ,t1.CD_Situacao_Cobranca           AS CodigoSituacaoCobranca
-        ,t1.CD_Tipo_Garantia               AS CodigoTipoGarantia
-        ,t1.ID_Grupo                       AS IdGrupo
-        ,t1.ID_Cota                        AS IdCota
-        ,t1.ID_Empresa                     AS IdEmpresa
-        ,t1.ID_Documento                   AS IdDocumento
-        ,t1.ID_Tipo_Documento              AS IdTipoDocumento
-        ,t1.Empresa                        AS Empresa
-        ,t1.CD_Grupo                       AS CodigoGrupo
-        ,t1.Segmento                       AS Segmento
-        ,t1.CD_Cota                        AS CodigoCota
-        ,t1.Versao                         AS Versao
-        ,t1.PZ_Cota                        AS PazoCota
-        ,t1.QT_Dias_Contrato               AS QuantidadeDiasContrato
-        ,t1.DT_Venda                       AS DataVenda
-        ,t1.DT_Situacao_Cobranca           AS DataSituacaoCobranca
-        ,t1.CD_Usuario_Contratacao         AS CodigoUsuarioContratacao
-        ,t1.CD_Moeda                       AS CodigoMoeda
-        ,t1.CD_Tipo_Cliente                AS CodigoTipoCliente
-        ,t1.NO_Documento                   AS NumeroDocumento
-        ,t1.CD_Bem                         AS CodigoBem
-        ,t1.CD_Pessoa                      AS CodigoPessoa
-        ,t1.CD_Banco                       AS CodigoBanco
-        ,t1.NO_Agencia                     AS NumeroAgencia
-        ,t1.ST_Tipo_Conta_Corrente         AS SituacaoTipoContaCorrente
-        ,t1.NO_Conta_Corrente              AS NumeroContaCorrente
-        ,t1.DG_Conta_Corrente              AS DigitoContaCorrente
-        ,t1.Tipo_Evento                    AS TipoEvento
-        ,t1.Parametro_Contabil             AS ParametroContabil
-        ,t1.CD_Evento                      AS CodigoEvento
-        ,t1.NO_Sequencia                   AS NumeroSequencia
-        ,t1.DT_Contabil                    AS DataContabil
-        ,t1.DT_Pagamento                   AS DataPagamento
-        ,t1.CD_Referencia                  AS CodigoReferencia
-        ,t1.NO_Parcela                     AS NumeroParcela
-        ,t1.PE_Variacao_Preco_Bem          AS PercentualVariacaoPreco
-        ,t1.DT_Vencimento                  AS DataVencimento
-        ,t1.CD_Banco_Origem                AS CodigoBancoOrigem
-        ,t1.NO_Agencia_Origem              AS NumeroAgenciaOrigem
-        ,t1.ST_Tipo_Conta_Corrente_Origem  AS SituacaoTipoContaCorrenteOrigem
-        ,t1.NO_Conta_Corrente_Origem       AS NumeroContaCorrenteOrigem
-        ,t1.DG_Conta_Corrente_Origem       AS DigitoContaCorrenteOrigem
-        ,t1.CD_Banco_Destino               AS CodigoBancoDestino
-        ,t1.NO_Agencia_Destino             AS NumeroAgenciaDestino
-        ,t1.ST_Tipo_Conta_Corrente_Destino AS SituacaoTipoContaCorrenteDestino
-        ,t1.NO_Conta_Corrente_Destino      AS NumeroContaCorrenteDestino
-        ,t1.DG_Conta_Corrente_Destino      AS DigitoContaCorrenteDestino
-        ,t1.CD_Usuario                     AS CodigoUsuario
-        ,t1.VL_Lancamento                  AS ValorLancamento
-        ,t1.ST_Origem_Lancamento           AS SituacaoOrigemLancamento
-        ,t1.SN_Excluido                    AS Excluido
-        ,t1.ID_Aviso                       AS IdAviso
-    FROM vm_TAaclContabilNewconFluir t1 WITH (NOLOCK)
-    WHERE DM_Processamento = @DM_Processamento
-      AND SN_Excluido = 'N'
-      AND ID_Evento > @UltimoIdEvento
-      AND ID_Evento <= @LimiteFatia
-    ORDER BY ID_Evento ASC";
+---
 
-ALTERAR — IContabilizacaoFluirRepository.cs
-Adicionar dois métodos novos, sem remover nada:
-csharpTask<RangeIdEventoDto> ObterRangeIdsAsync(DateTime dataProcessamento);
+## Endpoint
 
-Task<IEnumerable<ContabilizacaoFluirDto>> ObterPorFatiaAsync(
-    DateTime dataProcessamento,
-    long ultimoIdEvento,
-    long limiteFatia,
-    int pageSize);
+POST /v1/contabilizacoes-contabeis
 
-CRIAR — UA2.Consorcio.Domain/Dtos/RangeIdEventoDto.cs
-csharpnamespace UA2.Consorcio.Domain.Dtos
-{
-    public class RangeIdEventoDto
+---
+
+## Request
+
+Headers:
+    Authorization: Bearer {token_sts}
+    Content-Type: application/json
+
+Body:
     {
-        public long IdMin { get; set; }
-        public long IdMax { get; set; }
+        "lote_id": "abc-123",
+        "data_batch": "2024-01-15"
     }
-}
 
-ALTERAR — ContabilizacaoFluirRepository.cs
-Adicionar dois métodos novos no final da classe:
-csharppublic async Task<RangeIdEventoDto> ObterRangeIdsAsync(DateTime dataProcessamento)
-{
-    try
-    {
-        using var connection = new SqlConnection(
-            ConnectionStringTokenDecryptor.DecryptConnectionStringTokenized(
-                _connectionConfiguration.LeituraBaseS00));
+---
 
-        var query = new StringBuilder();
-        query.AppendLine(ContabilizacaoFluirDicQueries.ObterRangeIds);
+## Respostas esperadas da API
 
-        var param = new DynamicParameters();
-        param.Add("@DM_Processamento", dataProcessamento);
+202 → Accepted — API aceitou o reprocessamento
+      Seguir normalmente sem lançar exceção
 
-        return await connection.QuerySingleAsync<RangeIdEventoDto>(
-            query.ToString(), param,
-            commandType: CommandType.Text,
-            commandTimeout: CommandTimeout);
+422 → Dado inválido — erro de negócio
+      Logar como warning
+      NAO lançar exceção
+      Seguir normalmente
+
+500 → Erro interno — erro de infraestrutura
+      Logar como error
+      Lançar exceção
+      Step Functions vai para Catch → Falha
+
+---
+
+## Implementação
+
+O ContabilizacoesClient já existe no projeto em:
+src/clients/external/contabilizacoes_client.py
+
+Adicionar o método reprocessar() seguindo o padrão
+já existente no arquivo:
+
+```python
+def reprocessar(self, lote_id: str, data_batch: str) -> None:
+    token = self.sts_client.get_token()
+
+    url = f"{self.base_url}/v1/contabilizacoes-contabeis"
+
+    payload = {
+        "lote_id": lote_id,
+        "data_batch": data_batch,
     }
-    catch (Exception ex)
-    {
-        _logger.LogError(ex,
-            "FALHA_DEPENDENCIA | Fluxo=ObterRangeIdsAsync | Erro={Erro}", ex.Message);
-        throw;
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
     }
-}
 
-public async Task<IEnumerable<ContabilizacaoFluirDto>> ObterPorFatiaAsync(
-    DateTime dataProcessamento,
-    long ultimoIdEvento,
-    long limiteFatia,
-    int pageSize)
-{
-    try
-    {
-        using var connection = new SqlConnection(
-            ConnectionStringTokenDecryptor.DecryptConnectionStringTokenized(
-                _connectionConfiguration.LeituraBaseS00));
+    logger.info(
+        "Chamando API de reprocessamento",
+        extra={
+            "lote_id": lote_id,
+            "data_batch": data_batch,
+            "url": url,
+        },
+    )
 
-        var query = new StringBuilder();
-        query.AppendLine(ContabilizacaoFluirDicQueries.ObterPorFatia);
+    response = self.session.post(
+        url,
+        json=payload,
+        headers=headers,
+    )
 
-        var param = new DynamicParameters();
-        param.Add("@DM_Processamento", dataProcessamento);
-        param.Add("@UltimoIdEvento",   ultimoIdEvento);
-        param.Add("@LimiteFatia",      limiteFatia);
-        param.Add("@PageSize",         pageSize);
+    if response.status_code == 422:
+        logger.warning(
+            "API retornou erro de negocio",
+            extra={
+                "lote_id": lote_id,
+                "data_batch": data_batch,
+                "status_code": response.status_code,
+                "response": response.text,
+            },
+        )
+        return
 
-        return await connection.QueryAsync<ContabilizacaoFluirDto>(
-            query.ToString(), param,
-            commandType: CommandType.Text,
-            commandTimeout: CommandTimeout);
-    }
-    catch (Exception ex)
-    {
-        _logger.LogError(ex,
-            "FALHA_DEPENDENCIA | Fluxo=ObterPorFatiaAsync | Erro={Erro}", ex.Message);
-        throw;
-    }
-}
+    if not response.ok:
+        logger.error(
+            "Erro ao chamar API de reprocessamento",
+            extra={
+                "lote_id": lote_id,
+                "data_batch": data_batch,
+                "status_code": response.status_code,
+                "response": response.text,
+            },
+        )
+        raise Exception(
+            f"Erro ao reprocessar lote {lote_id}. "
+            f"Status: {response.status_code}. "
+            f"Response: {response.text}"
+        )
 
-ALTERAR — ContabilizacaoDisponibilizacaoService.cs
-Substituir o conteúdo completo da classe:
-csharpusing System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.Extensions.Logging;
-using UA2.Consorcio.Domain.Interfaces.Repositories;
-using UA2.Consorcio.Domain.Interfaces.Services;
-using UA2.Consorcio.Domain.Wrappers;
+    logger.info(
+        "API de reprocessamento chamada com sucesso",
+        extra={
+            "lote_id": lote_id,
+            "data_batch": data_batch,
+            "status_code": response.status_code,
+        },
+    )
+```
 
-namespace UA2.Consorcio.Application.Services
-{
-    public class ContabilizacaoDisponibilizacaoService : IContabilizacaoDisponibilizacaoService
-    {
-        private const int ChunkSize      = 10_000;
-        private const int MaxParalelismo = 4;
+---
 
-        private readonly IContabilizacaoFluirRepository _contabilizacaoFluirRepository;
-        private readonly ICotaRepository                _cotaRepository;
-        private readonly IGrupoRepository               _grupoRepository;
-        private readonly IProcessoContabilizacaoService _processoContabilizacaoService;
-        private readonly ILogger<ContabilizacaoDisponibilizacaoService> _logger;
+## Testes
 
-        public ContabilizacaoDisponibilizacaoService(
-            IContabilizacaoFluirRepository contabilizacaoFluirRepository,
-            ICotaRepository                cotaRepository,
-            IGrupoRepository               grupoRepository,
-            IProcessoContabilizacaoService processoContabilizacaoService,
-            ILogger<ContabilizacaoDisponibilizacaoService> logger)
-        {
-            _contabilizacaoFluirRepository = contabilizacaoFluirRepository;
-            _cotaRepository                = cotaRepository;
-            _grupoRepository               = grupoRepository;
-            _processoContabilizacaoService = processoContabilizacaoService;
-            _logger                        = logger;
-        }
+Criar os seguintes testes unitários em tests/src/:
 
-        public async Task ProcessarAsync(
-            Guid loteId,
-            DateTime dataBatch,
-            DateTime dataProcessamento,
-            int totalRegistro,
-            CancellationToken cancellationToken)
-        {
-            // 1. Busca MIN e MAX do dia
-            var range = await _contabilizacaoFluirRepository
-                .ObterRangeIdsAsync(dataProcessamento);
+- test_reprocessar_202_sucesso
+  → deve gerar token via sts_client
+  → deve chamar POST /v1/contabilizacoes-contabeis
+  → deve passar lote_id e data_batch no body
+  → deve passar token no header Authorization
+  → response.status_code = 202
+  → não lança exceção
 
-            _logger.LogInformation(
-                "RANGE_OBTIDO | IdMin={IdMin} | IdMax={IdMax}",
-                range.IdMin, range.IdMax);
+- test_reprocessar_422_erro_negocio
+  → response.status_code = 422
+  → NAO deve lançar exceção
+  → deve logar warning com status_code e response
 
-            // 2. Divide em N fatias — uma por paralelo
-            var fatias = DividirEmFatias(range.IdMin, range.IdMax, MaxParalelismo);
+- test_reprocessar_500_erro_infraestrutura
+  → response.status_code = 500
+  → deve lançar Exception
+  → deve logar error com status_code e response
 
-            // 3. Cada fatia roda em paralelo com seu próprio cursor interno
-            var tasks = fatias.Select(fatia => ProcessarFatiaAsync(
-                fatia.IdInicio,
-                fatia.IdFim,
-                dataProcessamento,
-                dataBatch,
-                loteId,
-                totalRegistro,
-                cancellationToken));
+- test_reprocessar_erro_token
+  → sts_client.get_token() lança exceção
+  → deve propagar exceção sem chamar a API
 
-            await Task.WhenAll(tasks);
-        }
+Usar mocks para session e sts_client.
 
-        private static IEnumerable<(long IdInicio, long IdFim)> DividirEmFatias(
-            long idMin, long idMax, int totalFatias)
-        {
-            var tamanhoFatia = (long)Math.Ceiling((double)(idMax - idMin + 1) / totalFatias);
+---
 
-            for (var i = 0; i < totalFatias; i++)
-            {
-                var inicio = idMin + (i * tamanhoFatia);
-                var fim    = Math.Min(inicio + tamanhoFatia - 1, idMax);
-                if (inicio > idMax) break;
-                yield return (inicio, fim);
-            }
-        }
-
-        private async Task ProcessarFatiaAsync(
-            long idInicio,
-            long idFim,
-            DateTime dataProcessamento,
-            DateTime dataBatch,
-            Guid loteId,
-            int totalRegistro,
-            CancellationToken cancellationToken)
-        {
-            // Cursor começa antes do primeiro ID da fatia
-            var ultimoIdEvento = idInicio - 1;
-
-            _logger.LogInformation(
-                "FATIA_INICIADA | IdInicio={IdInicio} | IdFim={IdFim}",
-                idInicio, idFim);
-
-            while (true)
-            {
-                // Cursor avança pelo último ID — tempo constante, usa índice
-                var lista = (await _contabilizacaoFluirRepository.ObterPorFatiaAsync(
-                    dataProcessamento,
-                    ultimoIdEvento,
-                    idFim,
-                    ChunkSize)).ToList();
-
-                if (!lista.Any()) break;
-
-                ultimoIdEvento = lista.Last().IdEvento;
-
-                var idCotaSet  = lista.Select(x => x.IdCota).Distinct().ToArray();
-                var idGrupoSet = lista.Select(x => x.IdGrupo).Distinct().ToArray();
-
-                var taskCota  = _cotaRepository.ObterPorAsync(idCotaSet);
-                var taskGrupo = _grupoRepository.ObterPorAsync(idGrupoSet);
-                await Task.WhenAll(taskCota, taskGrupo);
-
-                var cotaList = (await taskCota)
-                    .GroupBy(x => x.IdCota)
-                    .ToDictionary(g => g.Key, g => g.First());
-
-                var grupoList = (await taskGrupo)
-                    .GroupBy(x => x.IdGrupo)
-                    .ToDictionary(g => g.Key, g => g.First());
-
-                var eventoContabilizacaoList = lista
-                    .AsParallel()
-                    .WithDegreeOfParallelism(10)
-                    .Select(evento =>
-                    {
-                        var cotaDto  = cotaList.TryGetValue(evento.IdCota,   out var cota)  ? cota  : null;
-                        var grupoDto = grupoList.TryGetValue(evento.IdGrupo, out var grupo) ? grupo : null;
-                        return EventoContabilizacaoWrapper.Criar(evento, cotaDto, grupoDto);
-                    })
-                    .ToList();
-
-                var lote = new LoteWrapper(loteId, dataBatch, totalRegistro);
-                foreach (var eventoContabil in eventoContabilizacaoList)
-                    lote.AdicionarEventoContabilizacao(eventoContabil);
-
-                await _processoContabilizacaoService
-                    .PublicarContabilizacaoAsync(lote, cancellationToken);
-
-                _logger.LogInformation(
-                    "FATIA_PAGINA | UltimoId={UltimoId} | LimiteFatia={LimiteFatia} | Eventos={Eventos}",
-                    ultimoIdEvento, idFim, eventoContabilizacaoList.Count);
-            }
-
-            _logger.LogInformation(
-                "FATIA_CONCLUIDA | IdInicio={IdInicio} | IdFim={IdFim}",
-                idInicio, idFim);
-        }
-    }
-}
-
-Resumo das mudanças
-AçãoArquivo✅ AlterarContabilizacaoFluirDicQueries.cs — 2 queries novas✅ AlterarIContabilizacaoFluirRepository.cs — 2 métodos novos✅ CriarDomain/Dtos/RangeIdEventoDto.cs✅ AlterarContabilizacaoFluirRepository.cs — 2 implementações novas✅ AlterarContabilizacaoDisponibilizacaoService.cs — fatias com cursor
-
-⚠️ O ObterPorOffset e ObterPorOffsetAsync podem ser mantidos ou removidos — não são mais usados pela nova lógica.
-
-Pode testar quando quiser!
+## Padrões obrigatórios
+- logger = logging.getLogger(__name__)
+- Nunca usar print() — sempre logger
+- Tipos anotados em todos os métodos
+- Seguir padrão já existente no ContabilizacoesClient
+- Imports organizados: stdlib → third party → internal
