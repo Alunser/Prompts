@@ -1,5 +1,37 @@
-Tabela 1:
-[{ "column_name": "cod_idef_cont_ctbl_sist_prod", "column_type": "bigint", "column_comment": "Codigo identificador conta contabil sistema produto" }, { "column_name": "cod_cont_ctbl_sist_prod", "column_type": "varchar", "column_comment": "Codigo conta contabil sistema produto" }, { "column_name": "nom_cont_ctbl", "column_type": "varchar", "column_comment": "Nome conta contabil" }, { "column_name": "cod_crtr", "column_type": "varchar", "column_comment": "Codigo criterio" }, { "column_name": "cod_cont_ctbl", "column_type": "bigint", "column_comment": "Codigo conta contabil" }, { "column_name": "cod_tipo_ccli", "column_type": "varchar", "column_comment": "Codigo tipo classificacao cliente" }]
-
-Tabela 2:
-[{ "column_name": "cod_idef_sald_cont", "column_type": "bigint", "column_comment": "Codigo identificador saldo conta" }, { "column_name": "cod_unic_lote", "column_type": "varchar", "column_comment": "Codigo unico lote" }, { "column_name": "dat_hor_rfrc_psst", "column_type": "datetime", "column_comment": "Data hora referencia posicao" }, { "column_name": "dat_lanc", "column_type": "date", "column_comment": "Data lancamento" }, { "column_name": "sig_orig", "column_type": "varchar", "column_comment": "Sigla origem" }, { "column_name": "cod_idef_grup", "column_type": "bigint", "column_comment": "Codigo identificador grupo" }, { "column_name": "num_grup", "column_type": "varchar", "column_comment": "Numero grupo" }, { "column_name": "cod_situ_grup", "column_type": "char", "column_comment": "Codigo situacao grupo" }, { "column_name": "cod_prod_sist_prod", "column_type": "varchar", "column_comment": "Codigo produto sistema produto" }, { "column_name": "cod_prod_opel", "column_type": "int", "column_comment": "Codigo produto operacional" }, { "column_name": "cod_idef_cont_ctbl_sist_prod", "column_type": "bigint", "column_comment": "Codigo identificador conta contabil sistema produto" }, { "column_name": "num_empr", "column_type": "smallint", "column_comment": "Numero empresa" }, { "column_name": "cod_empr_orig", "column_type": "varchar", "column_comment": "Codigo empresa origem" }, { "column_name": "cod_tipo_empr_orig", "column_type": "varchar", "column_comment": "Codigo tipo empresa origem" }, { "column_name": "cod_ctrl_sald", "column_type": "char", "column_comment": "Codigo controle saldo" }, { "column_name": "cod_cont_ctbl", "column_type": "bigint", "column_comment": "Codigo conta contabil" }, { "column_name": "nom_cont_ctbl", "column_type": "varchar", "column_comment": "Nome conta contabil" }, { "column_name": "cod_crtr", "column_type": "varchar", "column_comment": "Codigo criterio" }, { "column_name": "vlr_debt", "column_type": "decimal", "column_comment": "Valor debito" }, { "column_name": "vlr_cred", "column_type": "decimal", "column_comment": "Valor credito" }, { "column_name": "vlr_sald_cont_ctbl", "column_type": "decimal", "column_comment": "Valor saldo conta contabil" }]
+{
+    "terminal.integrated.defaultProfile.windows": "Command Prompt",
+    "terminal.integrated.automationProfile.windows": {
+    },
+    "http.proxy": "http://proxynew.itau:8080",
+    "workbench.iconTheme": "material-icon-theme",
+    "[javascript]": {
+        "editor.defaultFormatter": "vscode.typescript-language-features"
+    },
+    "github.copilot.editor.enableAutoCompletions": true,
+    "http.proxyAuthorization": null,
+    "mssql.enableRichExperiences": true,
+    "mssql.connections": [],
+    "mssql.enableQueryHistoryCapture": false,
+    "[sql]": {
+        "editor.defaultFormatter": "adpyke.vscode-sql-formatter"
+    },
+    "workbench.colorTheme": "One Dark Pro Darker",
+    "http.proxyStrictSSL": false,
+    "files.autoSave": "afterDelay",
+    "[dockercompose]": {
+        "editor.insertSpaces": true,
+        "editor.tabSize": 2,
+        "editor.autoIndent": "advanced",
+        "editor.defaultFormatter": "redhat.vscode-yaml"
+    },
+    "[github-actions-workflow]": {
+        "editor.defaultFormatter": "redhat.vscode-yaml"
+    },
+    "python.defaultInterpreterPath": "c:\\Program Files\\Python312\\python.exe",
+    "dotnetAcquisitionExtension.existingDotnetPath": [
+        {
+            "extensionId": "ms-dotnettools.csharp",
+            "path": "C:\\Program Files\\dotnet\\dotnet.exe"
+        }
+    ]
+}
