@@ -1,4 +1,8 @@
-Oi Alicia, o que me parece estranho é que esse plugin da infra da role já tinha sido aplicado em prod, tanto que a role já existe em produção, então não entendi por que o parâmetro estaria vazio agora.
-Olhando a documentação do plugin, não vejo nenhum input onde eu informe manualmente esse name/arn do conector — pelo que entendi, esses dados são preenchidos automaticamente pelo stk-cli no momento do apply, e não é algo que eu configuro diretamente.
-Isso significa que eu precisaria rodar o deploy pra produção novamente pra esse parâmetro ser gerado? Ou existe uma forma de vocês regerarem isso do lado do StackSpot sem eu precisar reaplicar em prod?
-Fico no aguardo pra entender o melhor caminho antes de fazer qualquer novo apply.
+Pessoal estou com um cenário estranho aqui onde eu criei a infra da IAM Role (plat-cont-val-conc-ctb-lbd-iam) em produção usando o plugin itau-corp/infraestrutura@1.10.2/infraestrutura-aws-iam-role@7.0.3, e essa aplicação já rodou com sucesso antes — a role já existe normalmente na conta AWS de produção.
+Só que agora, ao tentar aplicar o plugin qf4-infraestrutura/infraestrutura-aws-lambda@7.0.8 (que depende desse conector plat-cont-val-conc-ctb-lbd-iam), estou recebendo o erro:
+ERROR: NO_REGISTERED_PARAMETERS_FOR_CHOSEN_CONNECTION_ERROR
+No parameters are registered for the 'plat-cont-val-conc-ctb-lbd-iam' connector in the 'fx9-posvendaconsorcio' workspace.
+Fui verificar na Connection Interface do workspace e realmente o parâmetro (name/arn) do ambiente producao está vazio para esse conector — enquanto os ambientes desenvolvimento e homologacao têm os dados preenchidos normalmente.
+O estranho é que, como a role da infra já foi aplicada antes em prod com sucesso, eu esperava que esse parâmetro já estivesse registrado — não é a primeira execução nesse ambiente. Não fiz nenhuma mudança de nome de recurso, alias ou versão do plugin entre a última execução bem-sucedida e agora.
+Olhando a documentação do plugin infraestrutura-aws-iam-role, não encontrei nenhum input onde esse name/arn do conector deveria ser preenchido manualmente — pelo que entendi, isso é gerado automaticamente pelo stk-cli durante o apply.
+Alguém já passou por esse cenário de o parâmetro de um ambiente 'sumir' da Connection Interface mesmo depois de já ter sido aplicado com sucesso? Preciso rodar o apply/update de novo em prod pra reconstruir isso, ou tem algum jeito de regenerar sem reaplicar a infra toda?
