@@ -1,8 +1,7 @@
-Pessoal estou com um cenário estranho aqui onde eu criei a infra da IAM Role (plat-cont-val-conc-ctb-lbd-iam) em produção usando o plugin itau-corp/infraestrutura@1.10.2/infraestrutura-aws-iam-role@7.0.3, e essa aplicação já rodou com sucesso antes — a role já existe normalmente na conta AWS de produção.
-Só que agora, ao tentar aplicar o plugin qf4-infraestrutura/infraestrutura-aws-lambda@7.0.8 (que depende desse conector plat-cont-val-conc-ctb-lbd-iam), estou recebendo o erro:
-ERROR: NO_REGISTERED_PARAMETERS_FOR_CHOSEN_CONNECTION_ERROR
-No parameters are registered for the 'plat-cont-val-conc-ctb-lbd-iam' connector in the 'fx9-posvendaconsorcio' workspace.
-Fui verificar na Connection Interface do workspace e realmente o parâmetro (name/arn) do ambiente producao está vazio para esse conector — enquanto os ambientes desenvolvimento e homologacao têm os dados preenchidos normalmente.
-O estranho é que, como a role da infra já foi aplicada antes em prod com sucesso, eu esperava que esse parâmetro já estivesse registrado — não é a primeira execução nesse ambiente. Não fiz nenhuma mudança de nome de recurso, alias ou versão do plugin entre a última execução bem-sucedida e agora.
-Olhando a documentação do plugin infraestrutura-aws-iam-role, não encontrei nenhum input onde esse name/arn do conector deveria ser preenchido manualmente — pelo que entendi, isso é gerado automaticamente pelo stk-cli durante o apply.
-Alguém já passou por esse cenário de o parâmetro de um ambiente 'sumir' da Connection Interface mesmo depois de já ter sido aplicado com sucesso? Preciso rodar o apply/update de novo em prod pra reconstruir isso, ou tem algum jeito de regenerar sem reaplicar a infra toda?
+kms:Decrypt
+Aperte Enter. Ele deve perguntar de novo "Adicionar action" — repita o processo pra cada uma:
+kms:GenerateDataKey
+ec2:DescribeNetworkInterfaces
+ec2:CreateNetworkInterface
+ec2:DeleteNetworkInterface
+logs:*
