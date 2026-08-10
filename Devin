@@ -1,46 +1,74 @@
-private void ReexportP12ForOpenSsl3(string? p12Path, string? password)
-{
-    if (string.IsNullOrEmpty(p12Path) || !File.Exists(p12Path))
-        return;
+Prompt para Devin — Evolução Endpoint de Grupos (Lance Fixo / Lance Quitação)
+Contexto da Demanda
 
-    try
-    {
-        _logger.LogInfoWithDetails("[CERT] Re-exportando P12 para compatibilidade com OpenSSL 3.x...");
+Evoluir o endpoint de grupos para disponibilizar os dados de Lance Fixo (LF) e Lance Quitação (LQ), utilizando como fonte de consulta a view vw_TAAclGruposSeqContemplacao. Objetivo: centralizar na API de grupos as informações necessárias para que os processos modernos do time de Assembleia identifiquem as modalidades de contemplação disponíveis, sem consultas adicionais ou implementação de regras de negócio nos sistemas consumidores.
 
-        var oldBytes = File.ReadAllBytes(p12Path);
+Novos Campos
+Campo	Regra
+SN_Lance_Fixo	"S" se existir ao menos um registro da modalidade LF com quantidade de cotas > 0; caso contrário "N".
+Proporcao_LF_LL	Calculado com as quantidades de cotas das modalidades LF e LL, considerando apenas NO_Sequencia_Contemplacao <= 10. Retorna no formato LF:LL (ex: 1:3, 2:4); se não houver configuração válida para ambas, retorna "-".
+SN_Lance_Quitacao	"S" se existir registro da modalidade LL com quantidade de cotas > 0, SN_Prioriza_Quitacao = 'S' e NO_Sequencia_Contemplacao <= 3; caso contrário "N".
+Qtde_Lance_Quitacao	Maior quantidade de cotas entre os registros LL com SN_Prioriza_Quitacao = 'S' e NO_Sequencia_Contemplacao <= 3; retorna 0 se não houver configuração.
 
-        // Import sem persistir no keystore da máquina/container
-        using var certAntigo = new X509Certificate2(
-            oldBytes,
-            password,
-            X509KeyStorageFlags.Exportable | X509KeyStorageFlags.EphemeralKeySet
-        );
+Essa demanda tem 2 frentes, em 2 repositórios diferentes. Trate cada uma como um passo independente, na ordem abaixo.
 
-        var chavePrivada = certAntigo.GetRSAPrivateKey()
-            ?? throw new InvalidOperationException("[CERT] Certificado nao possui chave privada RSA exportavel.");
+Frente 1 — Aplicação (código)
 
-        // Reexporta explicitamente com AES-256, sem depender do default da plataforma
-        var pkcs12Builder = new Pkcs12Builder();
-        var contentBag = new Pkcs12SafeContents();
+Pré-início
 
-        var pbeParams = new PbeParameters(
-            PbeEncryptionAlgorithm.Aes256Cbc,
-            HashAlgorithmName.SHA256,
-            iterationCount: 100_000
-        );
+Repo: [preencher — repo da aplicação, ex: itau-ua2-app-pagamentos]
+Branch base: develop (a nova branch deve sempre nascer da develop)
+Nome da nova branch: feature/[nome-da-história]
 
-        contentBag.AddCertificate(certAntigo);
-        contentBag.AddShroudedKey(chavePrivada, password, pbeParams);
+Ajustes Implementar a lógica dos 4 campos novos (regras acima) no código da aplicação que monta a resposta do endpoint de grupos, consumindo a view vw_TAAclGruposSeqContemplacao.
 
-        pkcs12Builder.AddSafeContentsUnencrypted(contentBag);
-        pkcs12Builder.SealWithMac(password, HashAlgorithmName.SHA256, iterationCount: 100_000);
+Testes Unitários Criar/atualizar testes unitários cobrindo os 4 campos novos, incluindo casos de:
 
-        File.WriteAllBytes(p12Path, pkcs12Builder.Encode());
+Grupo com LF configurado e sem configurar
+Proporção LF:LL válida e ausente (retorno "-")
+LQ com e sem SN_Prioriza_Quitacao = 'S'
+Sequência de contemplação no limite (10 para LF/LL, 3 para LQ) e fora do limite
+Ausência total de configuração para o grupo (valores default: "N" / "-" / 0)
 
-        _logger.LogInfoWithDetails("[CERT] P12 re-exportado com sucesso (AES-256-CBC).");
-    }
-    catch (Exception ex)
-    {
-        _logger.LogWarning(ex, "[CERT] Falha ao re-exportar P12. O arquivo original sera mantido.");
-    }
-}
+⚠️ Cobertura mínima obrigatória A esteira exige cobertura mínima de 90%. Não é suficiente apenas cobrir os 4 campos novos: ao final, verifique a cobertura geral do projeto. Se o percentual ficar abaixo de 90% (ex: 89%), identifique os trechos não cobertos (novos ou pré-existentes impactados pela mudança) e crie testes adicionais até atingir os 90%. A tarefa só está concluída quando a cobertura geral for confirmada em 90% ou mais.
+
+Frente 2 — Contrato (OpenAPI)
+
+Pré-início
+
+Repo: itau-ua2-gtw-emprestimos-consorcio-camada-acl
+Branch base: develop (a nova branch deve sempre nascer da develop)
+Nome da nova branch: feature/[nome-da-história]
+
+Alteração de Contrato — seja assertivo, não pule nenhuma pasta
+
+O contrato desse repo segue uma estrutura padronizada de pastas de apoio (ex: metadata, parameters, requestBodies, responses, schemas, securitySchemes, examples, extensions, além do .yaml principal). Ao incluir os novos campos no endpoint de grupos, você deve:
+
+Escolher um endpoint já existente e completo no mesmo repo como referência de padrão (ex: /agendas, se aplicável).
+Mapear, nesse endpoint de referência, todas as pastas que possuem arquivo(s) relacionados a ele — não assumir que só schemas é usado; verificar metadata, parameters, requestBodies, responses, examples, securitySchemes, extensions uma a uma.
+Para cada pasta em que o endpoint de referência tiver arquivo, verificar se o endpoint de grupos já possui o arquivo correspondente:
+Se existir, atualizar incluindo os 4 novos campos.
+Se não existir, criar seguindo exatamente o mesmo padrão de nomenclatura, formatação e nós de referência ($ref) usados no endpoint de referência.
+Atualizar o .yaml principal apontando os $ref para os arquivos ajustados/criados em cada pasta.
+Ao final, revisar pasta por pasta e confirmar que nenhuma ficou sem o ajuste correspondente — o critério de aceite é: se o endpoint de referência tem um arquivo numa pasta, o endpoint de grupos também precisa ter, atualizado.
+
+Estrutura de Pastas/Arquivos (padrão OpenAPI do repo)
+
+\.github
+\workflows
+\examples
+\extensions
+\metadata
+\parameters
+\requestBodies
+\responses
+\schemas
+\securitySchemes
+.gitignore
+.iupipes.yml
+README.md
+exchange.json
+itau-ua2-gtw-emprestimos-consorcio-camada-acl.yaml
+Observação Geral
+
+Para as 2 frentes: valide contra um endpoint de referência já existente e completo no mesmo repo antes de finalizar, para garantir que nenhum arquivo/pasta/entrada ficou incompleto, e que a cobertura de testes atinge o mínimo exigido pela esteira.
