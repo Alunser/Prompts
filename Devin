@@ -1,5 +1,46 @@
-{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["lambda:InvokeFunction"],"Resource":["arn:aws:lambda:sa-east-1:714043215415:function:plat-cont-val-conc-ctb-lbd","arn:aws:lambda:sa-east-1:714043215415:function:plat-cont-val-conc-ctb-lbd:*"]},{"Effect":"Allow","Action":["glue:StartJobRun","glue:GetJobRun","glue:GetJobRuns","glue:BatchStopJobRun"],"Resource":["arn:aws:glue:sa-east-1:714043215415:job/plat-contabil-datamesh-glue-job","arn:aws:glue:sa-east-1:714043215415:job/data_transformer_consorcio_sald_cont_ctbl_mlto"]},{"Effect":"Allow","Action":["logs:CreateLogDelivery","logs:GetLogDelivery","logs:UpdateLogDelivery","logs:DeleteLogDelivery","logs:ListLogDeliveries","logs:PutResourcePolicy","logs:DescribeResourcePolicies","logs:DescribeLogGroups"],"Resource":"*","Condition":{"StringEquals":{"aws:RequestedRegion":"sa-east-1"}}}]}
+private void ReexportP12ForOpenSsl3(string? p12Path, string? password)
+{
+    if (string.IsNullOrEmpty(p12Path) || !File.Exists(p12Path))
+        return;
 
-{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["lambda:InvokeFunction"],"Resource":["arn:aws:lambda:sa-east-1:004392246441:function:plat-cont-val-conc-ctb-lbd","arn:aws:lambda:sa-east-1:004392246441:function:plat-cont-val-conc-ctb-lbd:*"]},{"Effect":"Allow","Action":["glue:StartJobRun","glue:GetJobRun","glue:GetJobRuns","glue:BatchStopJobRun"],"Resource":["arn:aws:glue:sa-east-1:004392246441:job/plat-contabil-datamesh-glue-job","arn:aws:glue:sa-east-1:004392246441:job/data_transformer_consorcio_sald_cont_ctbl_mlto"]},{"Effect":"Allow","Action":["logs:CreateLogDelivery","logs:GetLogDelivery","logs:UpdateLogDelivery","logs:DeleteLogDelivery","logs:ListLogDeliveries","logs:PutResourcePolicy","logs:DescribeResourcePolicies","logs:DescribeLogGroups"],"Resource":"*","Condition":{"StringEquals":{"aws:RequestedRegion":"sa-east-1"}}}]}
+    try
+    {
+        _logger.LogInfoWithDetails("[CERT] Re-exportando P12 para compatibilidade com OpenSSL 3.x...");
 
-{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["lambda:InvokeFunction"],"Resource":["arn:aws:lambda:sa-east-1:447965913074:function:plat-cont-val-conc-ctb-lbd","arn:aws:lambda:sa-east-1:447965913074:function:plat-cont-val-conc-ctb-lbd:*"]},{"Effect":"Allow","Action":["glue:StartJobRun","glue:GetJobRun","glue:GetJobRuns","glue:BatchStopJobRun"],"Resource":["arn:aws:glue:sa-east-1:447965913074:job/plat-contabil-datamesh-glue-job","arn:aws:glue:sa-east-1:447965913074:job/data_transformer_consorcio_sald_cont_ctbl_mlto"]},{"Effect":"Allow","Action":["logs:CreateLogDelivery","logs:GetLogDelivery","logs:UpdateLogDelivery","logs:DeleteLogDelivery","logs:ListLogDeliveries","logs:PutResourcePolicy","logs:DescribeResourcePolicies","logs:DescribeLogGroups"],"Resource":"*","Condition":{"StringEquals":{"aws:RequestedRegion":"sa-east-1"}}}]}
+        var oldBytes = File.ReadAllBytes(p12Path);
+
+        // Import sem persistir no keystore da máquina/container
+        using var certAntigo = new X509Certificate2(
+            oldBytes,
+            password,
+            X509KeyStorageFlags.Exportable | X509KeyStorageFlags.EphemeralKeySet
+        );
+
+        var chavePrivada = certAntigo.GetRSAPrivateKey()
+            ?? throw new InvalidOperationException("[CERT] Certificado nao possui chave privada RSA exportavel.");
+
+        // Reexporta explicitamente com AES-256, sem depender do default da plataforma
+        var pkcs12Builder = new Pkcs12Builder();
+        var contentBag = new Pkcs12SafeContents();
+
+        var pbeParams = new PbeParameters(
+            PbeEncryptionAlgorithm.Aes256Cbc,
+            HashAlgorithmName.SHA256,
+            iterationCount: 100_000
+        );
+
+        contentBag.AddCertificate(certAntigo);
+        contentBag.AddShroudedKey(chavePrivada, password, pbeParams);
+
+        pkcs12Builder.AddSafeContentsUnencrypted(contentBag);
+        pkcs12Builder.SealWithMac(password, HashAlgorithmName.SHA256, iterationCount: 100_000);
+
+        File.WriteAllBytes(p12Path, pkcs12Builder.Encode());
+
+        _logger.LogInfoWithDetails("[CERT] P12 re-exportado com sucesso (AES-256-CBC).");
+    }
+    catch (Exception ex)
+    {
+        _logger.LogWarning(ex, "[CERT] Falha ao re-exportar P12. O arquivo original sera mantido.");
+    }
+}
