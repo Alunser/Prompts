@@ -1,39 +1,9 @@
-Contexto e Problema de Negócio:
+Devin, para confirmarmos a solução antes de finalizar, por favor me responda às seguintes validações:
 
-Hoje, a nossa pipeline salva os arquivos no S3 separando os dados na raiz apenas por data de carga (anomesdia). Dentro dessa pasta, ficam todos os registros contábeis que foram processados naquele dia.
+Estrutura de Pastas: O caminho final gravado no S3 para essa tabela configurada ficará exatamente no padrão .../dat_contabil=YYYYMMDD/anomesdia_versao=YYYYMMDD_vX/?
 
-O que precisamos mudar:
+Reprocessamento: Se eu rodar o mesmo anomesdia duas vezes para a mesma dat_contabil, o código vai sobrescrever a pasta anomesdia_versao existente em vez de criar uma v2/v3 duplicada?
 
-Precisamos alterar esse comportamento para que os dados sejam agrupados por Data Contábil (datacontabil) e Versionados a cada nova carga de processamento (anomesdia).
+Retrocompatibilidade: Tabelas que não possuem "EnableDataVersioning": True na config continuam gravando no fluxo padrão antigo (anomesdia=YYYYMMDD/) sem nenhum impacto?
 
-Como funciona o comportamento esperado:
-
-A primeira pasta (na raiz) deve ser a Data Contábil (datacontabil).
-
-Dentro de cada Data Contábil, teremos subpastas combinando a Data da Carga (anomesdia) com o Número da Versão (_v1, _v2, etc.).
-
-Se uma mesma Data Contábil reaparecer em execuções de cargas futuras, ela deve criar uma nova subpasta incrementando a versão (_v2, _v3...). Cada uma dessas subpastas conterá a foto completa dos dados referentes àquela versão específica.
-
-Exemplo do Resultado Esperado na Estrutura do S3:
-
-s3://.../datacontabil=20260801/
-
-20260806_v1/ → Contém 100% dos dados da data contábil 01/08 referentes à carga do dia 06/08.
-
-20260807_v2/ → Contém 100% dos dados da data contábil 01/08 referentes à carga do dia 07/08.
-
-s3://.../datacontabil=20260802/
-
-20260806_v1/ → Contém 100% dos dados da data contábil 02/08 referentes à carga do dia 06/08.
-
-20260807_v2/ → Contém 100% dos dados da data contábil 02/08 referentes à carga do dia 07/08.
-
-Regra Crítica de Reprocessamento (Idempotência):
-
-Atenção: Em caso de reprocessamento do mesmo anomesdia (por exemplo, rodar novamente a carga do dia 20260806), o pipeline deve sobrescrever/reescrever a versão correspondente que já foi gerada (ex: reescrever o conteúdo da pasta 20260806_v1/) em vez de criar uma nova versão (_v2 ou _v3). O incremento de versão só ocorre quando um novo anomesdia entra no fluxo.
-
-Requisito de Retrocompatibilidade:
-Essa mudança de comportamento não deve afetar outras rotinas que já funcionam no repositório. Queremos controlar essa nova regra de versionamento via configuração/parâmetro da tabela (por exemplo, ativando uma flag de versão), mantendo o comportamento padrão atual para as demais tabelas que não usarem essa flag.
-
-O que precisamos de você:
-Por favor, analise o código do nosso repositório, entenda como lemos as configurações das tabelas e como fazemos o salvamento no S3 hoje. Com base nisso, nos apresente uma proposta de como podemos aplicar essa solução no projeto.
+Testes Unitários: Todos os testes unitários (incluindo o test_build_df_columns_dict e os novos cenários de exceção em join_job_executer.py) estão passando com 100% de sucesso?
