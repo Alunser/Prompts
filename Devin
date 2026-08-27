@@ -1,9 +1,8 @@
-Devin, para confirmarmos a solução antes de finalizar, por favor me responda às seguintes validações:
-
-Estrutura de Pastas: O caminho final gravado no S3 para essa tabela configurada ficará exatamente no padrão .../dat_contabil=YYYYMMDD/anomesdia_versao=YYYYMMDD_vX/?
-
-Reprocessamento: Se eu rodar o mesmo anomesdia duas vezes para a mesma dat_contabil, o código vai sobrescrever a pasta anomesdia_versao existente em vez de criar uma v2/v3 duplicada?
-
-Retrocompatibilidade: Tabelas que não possuem "EnableDataVersioning": True na config continuam gravando no fluxo padrão antigo (anomesdia=YYYYMMDD/) sem nenhum impacto?
-
-Testes Unitários: Todos os testes unitários (incluindo o test_build_df_columns_dict e os novos cenários de exceção em join_job_executer.py) estão passando com 100% de sucesso?
+Prompt para enviar ao Devin:
+​"Devin, estamos enfrentando o erro HIVE_UNKNOWN_ERROR: partition value count must match partition column count no Athena na tabela consorcio_sald_cont_ctbl_mlto_sot.
+​Notei que as pastas no S3 estão sendo gravadas sempre com o sufixo fixo _v1 na partição anomesdia_versao (ex: anomesdia_versao=20260826_v1), independentemente do reprocessamento ou da data contábil.
+​Por favor, me explique:
+​Como você está construindo a lógica de geração da coluna anomesdia_versao no script Spark/Glue?
+​Como o job lida com o incremento dessa versão (_v2, _v3...) caso ocorra uma reexecução para a mesma dat_contabil?
+​Qual a opção de gravação usada no .write (append ou overwrite) e como o partition spec é passado?
+​Me mostre o trecho exato do código PySpark onde a coluna de partição é definida e onde a gravação no S3 acontece."
