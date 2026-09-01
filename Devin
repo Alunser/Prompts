@@ -1,6 +1,6 @@
 SOURCE "arn:aws:logs:sa-east-1:447965913074:log-group:/aws/lambda/gravacontabilsistprodutolambda" START=-1w END=0s
 | filter @message like /Foreign Key Constraint Error/
-| parse @message /'codigo_evento':\s*'(?<codigo_evento>[^']+)'/
-| parse @message /'codigo_situacao_grupo':\s*'(?<codigo_situacao_grupo>[^']+)'/
+| parse @message /['"]codigo_evento['"]\s*:\s*['"](?<codigo_evento>[^'"]+)['"]/
+| parse @message /['"]codigo_situacao_grupo['"]\s*:\s*['"](?<codigo_situacao_grupo>[^'"]+)['"]/
 | stats count() as total_ocorrencias by codigo_evento, codigo_situacao_grupo
 | sort total_ocorrencias desc
