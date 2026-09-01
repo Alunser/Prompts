@@ -1,16 +1,10 @@
-Devin, NÃO faça nenhuma alteração no código nem crie Pull Requests ainda. Preciso que você atue apenas como analista de software e faça uma simulação do nosso fluxo de fuso horário.
-​Contexto do Problema:
-Temos um Worker (NotificarSituacaoPropostaCreditoAtualizada) que roda a cada 15 minutos para buscar registros atualizados no SQL Server e publicá-los em um tópico do Kafka.
-​A regra de negócio busca registros onde a DataOcorrencia é maior que DataAtual - 15 minutos (DataOcorrencia > NOW - 15m).
-​O Cenário de Teste Manual:
-​Quando fazemos um teste no SQL Server, atualizamos um registro (ID Cota X) definindo sua data/hora de alteração com base no horário de Brasília (UTC-3), por exemplo, marcando 11:15:00.
-​O Worker roda no Kubernetes, onde o ambiente do container está operando em UTC (+0) (quando no Brasil são 11:30:00, no container do K8s a DataAtual lida pelo .NET é 14:30:00).
-​Sua Tarefa de Análise:
-​Mapeamento: Localize no código a query/método exato que o Worker utiliza para buscar esses registros e identifique como a data é capturada no .NET (DateTime.Now, DateTime.UtcNow) e como é comparada no SQL Server (GETDATE(), GETUTCDATE() ou parâmetro vindo do C#).
-​Simulação Numérica: Faça uma simulação passo a passo com horários reais. Monte uma tabela de comparação mostrando:
-​Horário de Brasília no momento da atualização do registro.
-​Valor exato gravado na coluna do banco de dados.
-​Horário calculado pelo Worker no K8s (DataAtual - 15 min).
-​O resultado da condição de filtro (DataOcorrencia > DataCalculada) explicando por que o registro é ignorado (retornando TotalRegistros: 0).
-​Proposta de Solução: Apresente os cenários possíveis para alinhar os fusos (converter aplicação para UTC vs. alinhar timezone do container no K8s vs. ajustes no SQL Server) detalhando os impactos de cada um no contrato do Kafka.
-​Resultado esperado: Apenas um relatório explicativo e detalhado no chat com a simulação do teste.
+​Pessoal, boa tarde.
+​Estou enfrentando uma divergência de fuso horário no nosso worker em .NET rodando no Kubernetes da Plataforma PaaS.
+​Cenário:
+​Localmente (UTC-3), o worker lê o horário correto e processa a regra de negócios normalmente (DataOcorrencia > DateTime.Now - 15min).
+​Publicado no cluster, o container assume UTC (+0) por padrão (ex: lê 15:08 enquanto no Brasil são 12:18), fazendo com que a janela de tempo com o SQL Server não bata e retorne 0 registros.
+​Dúvidas:
+​Qual é a boa prática recomendada na plataforma para alinhar o fuso dos pods para America/Sao_Paulo (UTC-3)?
+​Passar a variável de ambiente TZ: America/Sao_Paulo no deployment-config.yaml é o fluxo padrão, ou o pipeline de deploy/mesh sobrescreve essas ENVs por ambiente?
+​As imagens base padrão do PaaS já possuem o pacote tzdata instalado para o runtime do .NET reconhecer o fuso via SO, ou a melhor prática é tratar a conversão explicitamente na aplicação?
+​Agradeço desde já pelo apoio!
