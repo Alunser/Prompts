@@ -1,6 +1,41 @@
-SOURCE "arn:aws:logs:sa-east-1:447965913074:log-group:/aws/lambda/gravacontabilsistprodutolambda" START=-1w END=0s
-| filter @message like /Foreign Key Constraint Error/
-| parse @message /['"]codigo_evento['"]\s*:\s*['"](?<codigo_evento>[^'"]+)['"]/
-| parse @message /['"]codigo_situacao_grupo['"]\s*:\s*['"](?<codigo_situacao_grupo>[^'"]+)['"]/
-| stats count() as total_ocorrencias by codigo_evento, codigo_situacao_grupo
-| sort total_ocorrencias desc
+Prompt para Devin — Implementar Timeout Global de Requisição (15s)
+Contexto
+API .NET 6 (ASP.NET Core Web API) apresentando timeouts em cascata (504 Gateway Timeout) causados por requisições que ficam presas processando por 25-30s+, segurando conexões de banco e threads mesmo depois que o cliente/gateway já desistiu. O objetivo é fazer a API abortar o processamento de forma controlada aos 15s, liberando recursos (conexão SQL, threads, chamadas HTTP downstream) em vez de deixar o request "penduardo".
+Este padrão será replicado em outras APIs do time depois, então a implementação deve ser genérica e reutilizável — não hardcoded para uma rota específica.
+Objetivo
+Implementar um middleware global de timeout de requisição na API .NET 6 deste repositório, seguindo o padrão abaixo para que possa ser replicado depois em outras APIs do time.
+Requisitos funcionais
+Middleware de timeout global
+Criar um TimeoutMiddleware (ou RequestTimeoutMiddleware) que:
+Cria um CancellationTokenSource vinculado ao context.RequestAborted.
+Aplica CancelAfter com o timeout configurado.
+Substitui context.RequestAborted pelo token vinculado, para que ele se propague automaticamente para model binding, filtros e handlers do pipeline.
+Captura OperationCanceledException causada pelo cancelamento do middleware (não pelo cliente desconectando) e retorna 504 Gateway Timeout com um corpo JSON padronizado (ex: { "error": "timeout", "message": "A requisição excedeu o tempo limite de processamento." }), somente se a resposta ainda não tiver começado (!context.Response.HasStarted).
+Se o cancelamento veio do cliente (context.RequestAborted original já cancelado antes do middleware cancelar), não sobrescrever — deixar a exceção seguir normalmente.
+Timeout configurável, não hardcoded
+Valor default de 15 segundos, mas configurável via appsettings.json (ex: RequestTimeout:Seconds) e sobrescrevível por variável de ambiente, para que cada API/rota possa ajustar sem recompilar.
+Opcional (nice-to-have, mas útil para reuso futuro): permitir timeout diferente por rota via atributo customizado (ex: [RequestTimeout(Seconds = 20)]) que sobrepõe o default global.
+Propagação do CancellationToken para dependências internas
+Auditar os endpoints existentes do repositório e garantir que o CancellationToken da requisição seja efetivamente repassado para:
+Chamadas ao banco (Dapper, EF Core ou equivalente — os métodos *Async devem receber o CancellationToken como parâmetro, não usar CancellationToken.None implícito).
+Chamadas via HttpClient para serviços downstream, incluindo o HttpRequestMessage/SendAsync ou GetAsync(url, cancellationToken).
+Se algum método interno não aceitar CancellationToken hoje, adicionar o parâmetro na assinatura e propagar até o fim da cadeia (não travar em uma camada intermediária).
+Logging
+Ao ocorrer um timeout, logar (nível Warning) com: rota, método HTTP, tempo decorrido, e algum identificador de correlação/trace_id existente na aplicação (para cruzar com Datadog depois).
+Registro no pipeline
+Registrar o middleware o mais cedo possível no Program.cs/Startup.cs (antes de autenticação/roteamento), para cobrir o máximo do pipeline, mas depois de qualquer middleware de captura de exceção global existente (garantir compatibilidade, não duplicar handler de erro).
+Requisitos não-funcionais
+Não introduzir nenhuma mudança de comportamento para requisições que terminam dentro do tempo normal.
+Não quebrar testes existentes.
+Adicionar testes automatizados cobrindo:
+Requisição rápida → completa normalmente (sem interferência do middleware).
+Requisição que ultrapassa o timeout → retorna 504 com o corpo esperado.
+Cliente desconecta antes do timeout → não retorna 504 (deixa o comportamento padrão do ASP.NET).
+Documentar no README (ou em um doc separado docs/request-timeout.md) como o middleware funciona e como configurá-lo, pensando em reuso pelas outras APIs do time.
+Entregáveis esperados
+TimeoutMiddleware implementado e registrado.
+Configuração de timeout exposta em appsettings.json.
+Ajustes de propagação de CancellationToken nos endpoints existentes do repositório que fazem chamadas a banco e/ou downstream via HttpClient.
+Testes automatizados cobrindo os três cenários acima.
+Documentação curta explicando o padrão para replicação em outras APIs.
+PR com descrição clara do que foi alterado e por quê, referenciando o contexto de incidentes de 504 por requisições presas além do tempo esperado.
