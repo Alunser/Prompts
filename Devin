@@ -1,15 +1,18 @@
-​1. Acessar o cliente de banco de dados
-​Nome do passo: Conectar ao banco de dados target
-​Resultado esperado: Conexão estabelecida com sucesso no ambiente correspondente (DEV/HOMologação) utilizando usuário com privilégios de execução de scripts DDL.
-​2. Carregar o pacote da Newcon
-​Nome do passo: Abrir e revisar o script do pacote Newcon
-​Resultado esperado: Arquivo .sql contendo o pacote carregado na ferramenta/editor SQL sem caracteres corrompidos ou erros de encoding.
-​3. Executar o pacote no banco de dados
-​Nome do passo: Executar a compilação do pacote
-​Resultado esperado: Script executado com sucesso e objetos do pacote (especificação/corpo e a função X) criados/atualizados no schema sem erros de compilação (Warning: Package created with compilation errors não deve ocorrer).
-​4. Chamar a função X via consulta SQL
-​Nome do passo: Executar a função X criada pelo pacote
-​Resultado esperado: A função X é invocada utilizando SELECT pacote.funcao_x(parametros) FROM dual; (ou sintaxe equivalente do seu SGDB) e executa sem falhas de runtime.
-​5. Validar o retorno da função X
-​Nome do passo: Validar resultado do processamento
-​Resultado esperado: O retorno da função X apresenta o dado ou comportamento esperado de acordo com as regras de negócio do sistema Newcon.
+Passo 1
+​Nome do passo: Conectar ao banco de dados e validar permissões de compilação
+​Resultado esperado: Conexão estabelecida com sucesso no ambiente de teste e usuário com privilégios para executar scripts DDL sem erros de permissão.
+​Passo 2
+​Nome do passo: Executar a compilação do pacote contendo a FN_ACLCrsNLancePago
+​Resultado esperado: Script executado com sucesso e objeto da função FN_ACLCrsNLancePago compilado no schema sem gerar avisos de erro (não deve ocorrer Warning: Package created with compilation errors).
+​Passo 3
+​Nome do passo: Validar se o end-point de cotas aciona a função casca da ACL
+​Resultado esperado: A chamada ao end-point de cotas disponíveis para faturamento é redirecionada corretamente para a função FN_ACLCrsNLancePago(@ID_Cota) e retorna a lista de cotas com sucesso.
+​Passo 4
+​Nome do passo: Testar chamada da função com parâmetros nulos, vazios e limites (fronteira)
+​Resultado esperado: Ao passar @ID_Cota nulo, zero ou fora do limite (cota mínima/máxima), o sistema trata o valor e retorna mensagem de erro amigável sem apresentar falha de runtime não tratada.
+​Passo 5
+​Nome do passo: Executar o fluxo completo de lance pago de ponta a ponta
+​Resultado esperado: O processo de lance pago é concluído via aplicação, chamando a função FN_ACLCrsNLancePago e efetuando a gravação do faturamento corretamente na base de dados.
+​Passo 6
+​Nome do passo: Simular falha intermediária na chamada e reexecutar o lance pago
+​Resultado esperado: Em caso de falha de comunicação com o end-point de cotas, a reexecução do lance pago é permitida e finalizada com sucesso sem duplicar registros no banco.
