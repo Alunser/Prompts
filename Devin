@@ -1,1 +1,15 @@
-HTTPS_PROXY=http://proxynew.itau:8080 HTTP_PROXY=http://proxynew.itau:8080 claude install
+​1. Acessar o cliente de banco de dados
+​Nome do passo: Conectar ao banco de dados target
+​Resultado esperado: Conexão estabelecida com sucesso no ambiente correspondente (DEV/HOMologação) utilizando usuário com privilégios de execução de scripts DDL.
+​2. Carregar o pacote da Newcon
+​Nome do passo: Abrir e revisar o script do pacote Newcon
+​Resultado esperado: Arquivo .sql contendo o pacote carregado na ferramenta/editor SQL sem caracteres corrompidos ou erros de encoding.
+​3. Executar o pacote no banco de dados
+​Nome do passo: Executar a compilação do pacote
+​Resultado esperado: Script executado com sucesso e objetos do pacote (especificação/corpo e a função X) criados/atualizados no schema sem erros de compilação (Warning: Package created with compilation errors não deve ocorrer).
+​4. Chamar a função X via consulta SQL
+​Nome do passo: Executar a função X criada pelo pacote
+​Resultado esperado: A função X é invocada utilizando SELECT pacote.funcao_x(parametros) FROM dual; (ou sintaxe equivalente do seu SGDB) e executa sem falhas de runtime.
+​5. Validar o retorno da função X
+​Nome do passo: Validar resultado do processamento
+​Resultado esperado: O retorno da função X apresenta o dado ou comportamento esperado de acordo com as regras de negócio do sistema Newcon.
