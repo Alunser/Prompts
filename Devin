@@ -1,15 +1,39 @@
-Passo 1: Acessar o Autosserviço de Step Functions
-​Nome do passo: Acessar o catálogo de serviços no ServiceNow para execução de Step Functions em Produção.
-​Resultado esperado: O formulário "AWS Step Functions - Stop | Start | Redrive" deve ser exibido com sucesso.
-​Passo 2: Configurar Ambiente e Vínculo da Mudança (CHG)
-​Nome do passo: Selecionar a conta AWS de Produção e vincular a Gemude (Mudança) previamente aprovada no campo "Selecione sua mudança".
-​Resultado esperado: A conta de Produção e o número da CHG aprovada devem ser inseridos/selecionados corretamente sem erros de validação.
-​Passo 3: Configurar Operação e Parâmetros da Step Function
-​Nome do passo: Selecionar a operação "start", informar o ARN da State Machine de reprocessamento e preencher o Payload JSON com os dados do lote a ser reprocessado.
-​Resultado esperado: Todos os campos obrigatórios (Operação, ARN e Payload) devem estar preenchidos com as informações válidas do reprocessamento.
-​Passo 4: Submeter a Requisição (RITM)
-​Nome do passo: Submeter o formulário de solicitação para criar a RITM.
-​Resultado esperado: O chamado (RITM) deve ser gerado com sucesso e iniciar a execução automatizada da Step Function via integração.
-​Passo 5: Validar a Conclusão do Chamado e Reprocessamento
-​Nome do passo: Acompanhar o chamado no ServiceNow até a sua finalização.
-​Resultado esperado: O estado do chamado deve alterar para "Encerrado Totalmente" (ou "Concluído com sucesso"), confirmando que a Step Function foi startada e finalizada no ambiente da AWS sem erros.
+​Passo 1: Validar Existência e Gravação de versao_carga (CA-1)
+​Nome do passo: Validar gravação do campo versao_carga na SOT de saldos contábeis após execução do Glue Job.
+​Resultado esperado: O campo versao_carga deve estar presente na SOT e preenchido corretamente para cada registro inserido.
+
+​Passo 2: Validar Modo Append e Não-Sobrescrita de Registros (CA-2 e CA-3)
+​Nome do passo: Executar uma nova carga para um mesmo período e verificar persistência dos registros anteriores na SOT.
+​Resultado esperado: Os novos registros devem ser inseridos em modo append, garantindo que os registros das cargas anteriores não foram removidos nem sobrescritos.
+
+​Passo 3: Comparar Versões de Carga Lado a Lado (Y vs Y+1) (CA-4)
+​Nome do passo: Executar duas cargas consecutivas para a mesma data contábil e comparar versao_carga Y e Y+1.
+​Resultado esperado: As versões de carga devem ser incrementadas sequencialmente (Y e Y+1) e mantidas em histórico na SOT.
+
+​Passo 4: Consultar Filtrando por Data Contábil e versao_carga (CA-5)
+​Nome do passo: Executar consulta na SOT filtrando especificamente por uma data contábil e uma versao_carga.
+​Resultado esperado: O resultado da consulta deve retornar exatamente os registros correspondentes ao filtro informado.
+
+​Passo 5: Consultar Apenas a Versão Mais Recente (CA-6)
+​Nome do passo: Consultar a SOT filtrando por data contábil sem informar a versao_carga.
+​Resultado esperado: A consulta deve aplicar o fallback padrão e retornar exclusivamente os registros vinculados à versão de carga mais recente.
+
+​Passo 6: Monitorar e Comparar Estruturas de Outras SOTs (CA-8 e CA-9)
+​Nome do passo: Validar o schema e comportamento das demais SOTs geradas pelo mesmo Glue Job antes e depois do reprocessamento.
+​Resultado esperado: A estrutura (colunas e tipos) de todas as SOTs derivadas deve se manter íntegra sem divergências de schema.
+
+​Passo 7: Comparar Estrutura e Cálculo de Saldos Antes e Depois (CA-10 e CA-11)
+​Nome do passo: Executar reprocessamento e comparar a estrutura e o valor dos saldos contábeis gerados em relação à carga original.
+​Resultado esperado: A estrutura da tabela e os resultados dos cálculos de saldo contábil devem permanecer 100% idênticos após a implementação.
+
+​Passo 8: Validar Primeira Carga e Volume Máximo (Borda: Limite)
+​Nome do passo: Executar o teste com valor mínimo (versao_carga = 1) e com o volume máximo de registros suportado pela versão.
+​Resultado esperado: A primeira carga deve atribuir o valor 1 à versão de carga e o volume máximo de registros deve ser processado e persistido sem erros.
+
+​Passo 9: Validar Falha Durante a Carga (Borda: Exceção)
+​Nome do passo: Simular uma falha/interrupção no meio do processamento da carga contábil.
+​Resultado esperado: Registros parciais não devem ser persistidos na SOT e o número da versao_carga não deve ser incrementado.
+​
+Passo 10: Validar Consultas e Payloads Nulos/Inválidos (Borda: Nulo/Vazio)
+​Nome do passo: Tentar consultar a SOT com versao_carga nula/inexistente ou disparar a Step Function com payload vazio/sem data contábil.
+​Resultado esperado: O sistema deve tratar a ausência de parâmetros retornando mensagem de erro amigável ou acionando a regra de fallback configurada.
