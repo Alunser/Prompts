@@ -1,18 +1,15 @@
-Passo 1
-​Nome do passo: Conectar ao banco de dados e validar permissões de compilação
-​Resultado esperado: Conexão estabelecida com sucesso no ambiente de teste e usuário com privilégios para executar scripts DDL sem erros de permissão.
-​Passo 2
-​Nome do passo: Executar a compilação do pacote contendo a FN_ACLCrsNLancePago
-​Resultado esperado: Script executado com sucesso e objeto da função FN_ACLCrsNLancePago compilado no schema sem gerar avisos de erro (não deve ocorrer Warning: Package created with compilation errors).
-​Passo 3
-​Nome do passo: Validar se o end-point de cotas aciona a função casca da ACL
-​Resultado esperado: A chamada ao end-point de cotas disponíveis para faturamento é redirecionada corretamente para a função FN_ACLCrsNLancePago(@ID_Cota) e retorna a lista de cotas com sucesso.
-​Passo 4
-​Nome do passo: Testar chamada da função com parâmetros nulos, vazios e limites (fronteira)
-​Resultado esperado: Ao passar @ID_Cota nulo, zero ou fora do limite (cota mínima/máxima), o sistema trata o valor e retorna mensagem de erro amigável sem apresentar falha de runtime não tratada.
-​Passo 5
-​Nome do passo: Executar o fluxo completo de lance pago de ponta a ponta
-​Resultado esperado: O processo de lance pago é concluído via aplicação, chamando a função FN_ACLCrsNLancePago e efetuando a gravação do faturamento corretamente na base de dados.
-​Passo 6
-​Nome do passo: Simular falha intermediária na chamada e reexecutar o lance pago
-​Resultado esperado: Em caso de falha de comunicação com o end-point de cotas, a reexecução do lance pago é permitida e finalizada com sucesso sem duplicar registros no banco.
+Passo 1: Acessar o Autosserviço de Step Functions
+​Nome do passo: Acessar o catálogo de serviços no ServiceNow para execução de Step Functions em Produção.
+​Resultado esperado: O formulário "AWS Step Functions - Stop | Start | Redrive" deve ser exibido com sucesso.
+​Passo 2: Configurar Ambiente e Vínculo da Mudança (CHG)
+​Nome do passo: Selecionar a conta AWS de Produção e vincular a Gemude (Mudança) previamente aprovada no campo "Selecione sua mudança".
+​Resultado esperado: A conta de Produção e o número da CHG aprovada devem ser inseridos/selecionados corretamente sem erros de validação.
+​Passo 3: Configurar Operação e Parâmetros da Step Function
+​Nome do passo: Selecionar a operação "start", informar o ARN da State Machine de reprocessamento e preencher o Payload JSON com os dados do lote a ser reprocessado.
+​Resultado esperado: Todos os campos obrigatórios (Operação, ARN e Payload) devem estar preenchidos com as informações válidas do reprocessamento.
+​Passo 4: Submeter a Requisição (RITM)
+​Nome do passo: Submeter o formulário de solicitação para criar a RITM.
+​Resultado esperado: O chamado (RITM) deve ser gerado com sucesso e iniciar a execução automatizada da Step Function via integração.
+​Passo 5: Validar a Conclusão do Chamado e Reprocessamento
+​Nome do passo: Acompanhar o chamado no ServiceNow até a sua finalização.
+​Resultado esperado: O estado do chamado deve alterar para "Encerrado Totalmente" (ou "Concluído com sucesso"), confirmando que a Step Function foi startada e finalizada no ambiente da AWS sem erros.
